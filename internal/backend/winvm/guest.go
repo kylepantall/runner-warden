@@ -172,7 +172,9 @@ func parseGuestStats(out string) (guestStats, error) {
 		case "state":
 			g.State, seen = v, true
 		case "procs":
-			g.Procs = int(max(0, min(n, math.MaxInt32)))
+			if n > 0 && n <= math.MaxInt32 {
+				g.Procs = int(n)
+			}
 		case "log":
 			g.Log = n
 		case "diag":

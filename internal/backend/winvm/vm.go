@@ -100,14 +100,9 @@ func (p *Pool) containerSpec(v config.WindowsVM, storage, oem string, env []stri
 			},
 		},
 	}
-	// The spec hash detects config drift. The guest password is left out: it is
-	// fixed at install time and must not end up (even hashed) in a label.
-	var specEnv []string
-	for _, e := range cfg.Env {
-		if !strings.HasPrefix(e, "PASSWORD=") {
-			specEnv = append(specEnv, e)
-		}
-	}
+	// The spec hash detects config drift. It is built from the config without
+	// the guest password, which must not end up (even hashed) in a label.
+	specEnv := p.vmEnv(v, "")
 	h := sha256.New()
 	_ = json.NewEncoder(h).Encode([]any{cfg.Image, specEnv, hc.Binds, hc.PortBindings, hc.CgroupParent})
 	cfg.Labels[labelSpec] = hex.EncodeToString(h.Sum(nil))[:16]

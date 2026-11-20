@@ -89,7 +89,11 @@ func readCgroup(dir string) (s cgroupSample, ok bool) {
 		s.anon = clampInt64(m["anon"])
 	}
 	if m, err := readKV(filepath.Join(dir, "memory.events")); err == nil {
-		s.oomKills = int(min(m["oom_kill"], math.MaxInt32))
+		if k := m["oom_kill"]; k <= math.MaxInt32 {
+			s.oomKills = int(k)
+		} else {
+			s.oomKills = math.MaxInt32
+		}
 	}
 	s.ioBytes = readIOBytes(filepath.Join(dir, "io.stat"))
 	return s, true
