@@ -82,6 +82,7 @@ flowchart LR
 | Wall clock | 6 h | Kill |
 | Job completed/cancelled but processes alive | 3 min | Reap |
 | Runner never got a job | 10 min | Recycle |
+| PR job whose PR is merged/closed, or whose head branch is deleted | Checked on job assign + every 2 min while queued/running | Cancel the run (queued jobs never start). Push jobs on a deleted branch likewise. `eventName` + `workflowRunId` from the scale-set message identify them [V] |
 | Much slower than its own history | — | Report only |
 
 Kill = cancel run via API → force-cancel → stop then kill labelled containers / VM → async cleanup (workspace, volumes, networks) → delete registration → record evidence.

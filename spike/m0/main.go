@@ -32,8 +32,9 @@ const ownerLabel = "io.github.kylepantall.runner-warden.spike"
 type opts struct {
 	url, name, image, hostDir, socket, skip, slice string
 	labels                                         []string
-	max, sockGID                                   int
-	proxy                                          bool
+	max, sockGID, capacity                         int
+	proxy, noRunners, manualAcquire                bool
+	control                                        string
 }
 
 func main() {
@@ -50,6 +51,10 @@ func main() {
 	flag.StringVar(&o.skip, "skip", "", "regex on job display name: never acquire matching jobs")
 	flag.IntVar(&o.max, "max", 4, "max runners")
 	flag.BoolVar(&o.proxy, "proxy", false, "give each runner its own Docker socket proxy")
+	flag.IntVar(&o.capacity, "capacity", -1, "maxCapacity sent to the service (default: -max)")
+	flag.BoolVar(&o.noRunners, "no-runners", false, "never start runners automatically")
+	flag.BoolVar(&o.manualAcquire, "manual-acquire", false, "never acquire automatically; use the control socket")
+	flag.StringVar(&o.control, "control", "", "unix socket for the control API")
 	flag.StringVar(&o.slice, "slice", "rw-spike.slice", "cgroup parent for job containers (proxy mode)")
 	flag.Parse()
 	if labels != "" {
@@ -139,13 +144,23 @@ func listen(ctx context.Context, log *slog.Logger, client *scaleset.Client, o op
 	}
 	defer sess.Close(context.Background())
 
-	l, err := listener.New(sess, listener.Config{ScaleSetID: ss.ID, MaxRunners: o.max, Logger: log.WithGroup("listener")})
+	capacity := o.max
+	if o.capacity >= 0 {
+		capacity = o.capacity
+	}
+	l, err := listener.New(sess, listener.Config{ScaleSetID: ss.ID, MaxRunners: capacity, Logger: log.WithGroup("listener")})
 	if err != nil {
 		return err
 	}
-	s := &spikeScaler{log: log, o: o, dc: dc, client: client, sess: sess, ssID: ss.ID, runners: map[string]string{}, proxies: map[string]*dockerProxy{}}
+	s := &spikeScaler{log: log, o: o, dc: dc, client: client, sess: sess, ssID: ss.ID,
+		runners: map[string]string{}, proxies: map[string]*dockerProxy{}, available: map[int64]*scaleset.JobAvailable{}}
 	if o.skip != "" {
 		s.skip = regexp.MustCompile(o.skip)
+	}
+	if o.control != "" {
+		if err := serveControl(ctx, o.control, l, s); err != nil {
+			return fmt.Errorf("control: %w", err)
+		}
 	}
 	defer s.shutdown(context.WithoutCancel(ctx))
 	return l.Run(ctx, s)
@@ -160,9 +175,10 @@ type spikeScaler struct {
 	ssID   int
 	skip   *regexp.Regexp
 
-	mu      sync.Mutex
-	runners map[string]string // runner name -> container id
-	proxies map[string]*dockerProxy
+	mu        sync.Mutex
+	runners   map[string]string // runner name -> container id
+	proxies   map[string]*dockerProxy
+	available map[int64]*scaleset.JobAvailable // announced, not yet acquired
 }
 
 func dump(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -178,9 +194,13 @@ func (s *spikeScaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMes
 	}
 	var acquire []int64
 	for _, j := range msg.JobAvailableMessages {
-		skipped := s.skip != nil && s.skip.MatchString(j.JobDisplayName)
+		skipped := s.o.manualAcquire || (s.skip != nil && s.skip.MatchString(j.JobDisplayName))
 		s.log.Info("job available", "skipped", skipped, "job", dump(j))
-		if !skipped {
+		if skipped {
+			s.mu.Lock()
+			s.available[j.RunnerRequestID] = j
+			s.mu.Unlock()
+		} else {
 			acquire = append(acquire, j.RunnerRequestID)
 		}
 	}
@@ -202,6 +222,9 @@ func (s *spikeScaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMes
 		return nil
 	}
 	s.log.Info("statistics", "stats", dump(msg.Statistics))
+	if s.o.noRunners {
+		return nil
+	}
 	want := min(s.o.max, msg.Statistics.TotalAssignedJobs)
 	for s.count() < want {
 		if err := s.start(ctx); err != nil {
