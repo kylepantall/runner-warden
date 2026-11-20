@@ -180,7 +180,7 @@ func copyAt(srcfd int, src string, dstfd int, dst string) error {
 	if err := unix.Fstatat(srcfd, src, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return err
 	}
-	perm := uint32(st.Mode) & 0o7777 //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
+	perm := uint32(st.Mode) & 0o7777       //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
 	switch uint32(st.Mode) & unix.S_IFMT { //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
 	case unix.S_IFDIR:
 		if err := unix.Mkdirat(dstfd, dst, perm|0o700); err != nil {
