@@ -58,6 +58,7 @@ type Config struct {
 	StateDir      string `toml:"state_dir"`
 	CacheDir      string `toml:"cache_dir"`
 	LogLevel      string `toml:"log_level"`
+	ControlGroup  string `toml:"control_group"` // group owning the control socket (0660)
 
 	GitHub  GitHub   `toml:"github"`
 	Limits  Limits   `toml:"limits"`
@@ -83,8 +84,13 @@ type Limits struct {
 	DefaultJobMem    Size     `toml:"default_job_mem"`   // cost when nothing better is known
 	LightThreshold   Size     `toml:"light_threshold"`   // jobs at or below may overtake
 	RunnerOverhead   Size     `toml:"runner_overhead"`   // idle runner footprint
-	HoldMax          Duration `toml:"hold_max"`          // max time a heavy head job blocks light jobs
+	HoldMax          Duration `toml:"hold_max"`          // a job held this long gets a parked runner
 	AdmissionTimeout Duration `toml:"admission_timeout"` // hook wait before failing a job
+	Lanes            int      `toml:"lanes"`             // lane scale sets per (target, OS)
+	ReserveAfter     Duration `toml:"reserve_after"`     // oldest held job older than this blocks heavier overtakers
+	HolGrace         Duration `toml:"hol_grace"`         // all lanes held this long => promote a parked runner
+	MaxParked        int      `toml:"max_parked"`        // parked runners allowed host-wide
+	ExternalReserved Size     `toml:"external_reserved"` // memory used outside the ledger
 }
 
 type Linux struct {
@@ -292,7 +298,15 @@ func (c *Config) ApplyDefaults() {
 	defSize(&c.Limits.LightThreshold, 1*units.GiB)
 	defSize(&c.Limits.RunnerOverhead, 300*units.MiB)
 	defSize(&c.Limits.SwapMax, 2*units.GiB)
-	defDur(&c.Limits.HoldMax, 2*time.Minute)
+	defDur(&c.Limits.HoldMax, 30*time.Minute)
+	defDur(&c.Limits.ReserveAfter, 5*time.Minute)
+	defDur(&c.Limits.HolGrace, 2*time.Minute)
+	if c.Limits.Lanes == 0 {
+		c.Limits.Lanes = 4
+	}
+	if c.Limits.MaxParked == 0 {
+		c.Limits.MaxParked = 4
+	}
 	defDur(&c.Limits.AdmissionTimeout, 40*time.Minute)
 
 	def(&c.Linux.Image, "ghcr.io/actions/actions-runner:latest")
@@ -370,6 +384,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Instance != "" && !regexpSafe(c.Instance) {
 		add("instance %q: use lowercase letters, digits and hyphens", c.Instance)
+	}
+	if c.Limits.Lanes < 0 || c.Limits.MaxParked < 0 {
+		add("limits.lanes and limits.max_parked must not be negative")
 	}
 	if c.Limits.MemoryBudget <= 0 {
 		add("limits.memory_budget is required")
