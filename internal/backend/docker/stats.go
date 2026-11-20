@@ -78,7 +78,10 @@ func (b *Backend) Stats(ctx context.Context, h core.Handle) (core.Usage, error) 
 		}
 	}
 	b.fold(h.RunnerName, cur, &u)
-	u.LogBytes = dirSize(filepath.Join(b.runnerDir(h.RunnerName), "_diag"))
+	// Job console output only (pages/blocks): the Runner/Worker logs in _diag
+	// grow from keep-alives even when the job is stuck.
+	diag := filepath.Join(b.runnerDir(h.RunnerName), "_diag")
+	u.LogBytes = dirSize(filepath.Join(diag, "pages")) + dirSize(filepath.Join(diag, "blocks"))
 	return u, nil
 }
 

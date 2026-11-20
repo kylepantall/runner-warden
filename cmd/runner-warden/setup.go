@@ -101,7 +101,11 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 		}
 	}
 	if cfg == nil {
-		cfg = &config.Config{Linux: config.Linux{Enabled: true}}
+		cfg = &config.Config{
+			Linux: config.Linux{Enabled: true},
+			Stale: config.Stale{CancelClosedPRs: true, CancelDeletedBranch: true},
+			Hang:  config.Hang{RerunOnLoss: true},
+		}
 		step(out, "Prefix")
 		p := o.prefix
 		for p == "" && interactive {

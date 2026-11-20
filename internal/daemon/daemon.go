@@ -456,6 +456,11 @@ func (d *Daemon) restore(ctx context.Context) {
 				_ = b.Cleanup(ctx, h.RunnerName)
 				continue
 			}
+			// Only adopt runners still running; exited ones finished (or died)
+			// while we were down and GitHub has already settled their job.
+			if u, err := b.Stats(ctx, h); err != nil || !u.Alive {
+				continue
+			}
 			live[h.RunnerName] = h
 		}
 	}

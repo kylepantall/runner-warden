@@ -60,8 +60,10 @@ func TestStatsSumsContainersAndStaysMonotonic(t *testing.T) {
 	api.conts = []container.Summary{{ID: "job1"}}
 
 	diag := filepath.Join(b.runnerDir("r"), "_diag")
-	_ = os.MkdirAll(diag, 0o755)
-	_ = os.WriteFile(filepath.Join(diag, "Runner_1.log"), make([]byte, 1234), 0o644)
+	_ = os.MkdirAll(filepath.Join(diag, "pages"), 0o755)
+	_ = os.WriteFile(filepath.Join(diag, "pages", "step_1.log"), make([]byte, 1234), 0o644)
+	// Keep-alive noise in the runner's own logs must not count as job output.
+	_ = os.WriteFile(filepath.Join(diag, "Worker_1.log"), make([]byte, 999), 0o644)
 
 	h := core.Handle{RunnerName: "r", BackendID: "run1"}
 	u, err := b.Stats(context.Background(), h)

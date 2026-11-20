@@ -65,7 +65,7 @@ func statusCmd() *cobra.Command {
 						state = "busy"
 					}
 					if !r.Alive {
-						state = "down"
+						state = "exited"
 					}
 					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", r.Name, r.Target, r.OS, state,
 						units.BytesSize(float64(r.Mem)), units.BytesSize(float64(r.MemPeak)), r.OOM, time.Since(r.Started).Truncate(time.Second))
