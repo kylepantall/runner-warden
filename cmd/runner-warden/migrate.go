@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kylepantall/runner-warden/internal/config"
+	"github.com/kylepantall/runner-warden/internal/core"
 	gh "github.com/kylepantall/runner-warden/internal/github"
 	"github.com/kylepantall/runner-warden/internal/migrate"
 )
@@ -50,7 +52,10 @@ func migrateCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "no local runners in the plan")
 				return nil
 			}
-			r := &migrate.Retirer{StateDir: cfg.StateDir, Run: migrate.ExecRunner, API: rest, Log: newLogger("info")}
+			r := &migrate.Retirer{StateDir: cfg.StateDir, Run: migrate.ExecRunner, API: rest, Log: newLogger("info"), Allowed: cfgTargets(cfg)}
+			for _, lr := range plan.Local {
+				fmt.Fprintf(cmd.ErrOrStderr(), "candidate %s %s eligible=%t\n", lr.Name, lr.Dir, lr.Eligible)
+			}
 			m, err := r.Retire(cmd.Context(), plan.Local)
 			if err != nil {
 				return err
@@ -74,9 +79,14 @@ func migrateCmd() *cobra.Command {
 				return err
 			}
 			for _, x := range rr {
-				if x.NeedsRegistration {
-					fmt.Fprintf(cmd.OutOrStdout(), "cd %s && sudo -u $(stat -c %%U %s) ./config.sh %s && sudo systemctl start %s\n", x.Dir, x.Dir, joinArgs(x.Args), x.Name)
+				if !x.NeedsRegistration {
+					continue
 				}
+				line, err := rollbackLine(x)
+				if err != nil {
+					return fmt.Errorf("runner %q: %w", x.Name, err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), line)
 			}
 			return nil
 		},
@@ -124,13 +134,38 @@ func printJSON(cmd *cobra.Command, v any) error {
 	return e.Encode(v)
 }
 
-func joinArgs(a []string) string {
-	out := ""
-	for i, s := range a {
-		if i > 0 {
-			out += " "
-		}
-		out += fmt.Sprintf("%q", s)
+func cfgTargets(cfg *config.Config) []core.Target {
+	var out []core.Target
+	for _, t := range cfg.Targets {
+		out = append(out, t.Core())
 	}
 	return out
+}
+
+var errUnsafeRunner = errors.New("runner has characters that are unsafe in a shell command")
+
+// shQuote POSIX single-quotes s.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// rollbackLine builds the shell line that re-registers a restored runner.
+// Every field is single-quoted; names and labels must match a strict charset
+// and the unit is the recorded one, not derived from the runner name.
+func rollbackLine(x migrate.ReRegister) (string, error) {
+	if !migrate.ValidIdent(x.Name) || !migrate.ValidDir(x.Dir) || (x.Unit != "" && !migrate.ValidUnit(x.Unit)) {
+		return "", errUnsafeRunner
+	}
+	for _, l := range x.Labels {
+		if !migrate.ValidIdent(l) {
+			return "", errUnsafeRunner
+		}
+	}
+	q := make([]string, len(x.Args))
+	for i, a := range x.Args {
+		q[i] = shQuote(a)
+	}
+	line := fmt.Sprintf("cd %s && sudo -u \"$(stat -c %%U %s)\" %s", shQuote(x.Dir), shQuote(x.Dir), strings.Join(q, " "))
+	if x.Unit != "" {
+		line += " && sudo systemctl start " + shQuote(x.Unit)
+	}
+	return line, nil
 }

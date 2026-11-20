@@ -16,7 +16,8 @@ var update = flag.Bool("update", false, "rewrite golden files")
 
 var testRules = Rules{
 	Prefix:        "my-ci",
-	LegacyLabels:  []string{"home-ci", "general", "isolink", "kscript"},
+	LegacyLabels:  []string{"home-ci", "general", "isolink", "kscript", "tart"},
+	BareHost:      true,
 	WindowsLabels: []string{"isolink-windows"},
 }
 
@@ -200,5 +201,43 @@ func TestRewriteVarValue(t *testing.T) {
 		if _, ok := RewriteVarValue(in, testRules); ok {
 			t.Errorf("%q should not rewrite", in)
 		}
+	}
+}
+
+func TestForeignLabelsAreNotRewritten(t *testing.T) {
+	src := "jobs:\n  gpu:\n    runs-on: [self-hosted, general, gpu]\n  arm:\n    runs-on: [self-hosted, ARM64]\n  ok:\n    runs-on: [self-hosted, general]\n  bare:\n    runs-on: [self-hosted, Linux, X64]\n"
+	res := Analyze([]byte(src), testRules)
+	for _, job := range []string{"gpu", "arm"} {
+		if sk := skipsFor(res, job); len(sk) != 1 || sk[0].Reason != ReasonForeignLabels || len(changeFor(res, job)) != 0 {
+			t.Fatalf("%s: %+v", job, sk)
+		}
+	}
+	if len(changeFor(res, "ok")) != 1 || len(changeFor(res, "bare")) != 1 {
+		t.Fatalf("%+v", res.Changes)
+	}
+	// bare self-hosted only counts when a local runner carries just defaults
+	rules := testRules
+	rules.BareHost = false
+	res = Analyze([]byte(src), rules)
+	if sk := skipsFor(res, "bare"); len(sk) != 1 || sk[0].Reason != ReasonForeignLabels {
+		t.Fatalf("%+v", sk)
+	}
+	if _, ok := RewriteVarValue(`["self-hosted","general","gpu"]`, testRules); ok {
+		t.Fatal("foreign var value rewritten")
+	}
+}
+
+func TestMatrixExcludeAndOtherRefs(t *testing.T) {
+	src := "jobs:\n  t:\n    strategy:\n      matrix:\n        include:\n          - runner: general\n        exclude:\n          - runner: general\n    if: matrix.runner == 'general'\n    runs-on: ${{ matrix.runner }}\n"
+	res := Analyze([]byte(src), testRules)
+	if len(changeFor(res, "t")) != 2 {
+		t.Fatalf("%+v", res.Changes)
+	}
+	found := false
+	for _, s := range skipsFor(res, "t") {
+		found = found || s.Reason == ReasonMatrixKeyUsed
+	}
+	if !found {
+		t.Fatalf("%+v", res.Skipped)
 	}
 }

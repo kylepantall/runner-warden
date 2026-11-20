@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -214,49 +215,28 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 	for _, t := range cfg.Targets {
 		targets = append(targets, t.Core())
 	}
+	hostRoots := []string{"/home/*", "/opt", "/srv"}
 	rules := migrate.Rules{Prefix: cfg.Prefix, LegacyLabels: o.legacy, WindowsLabels: o.windowsLabels}
-	// Learn legacy labels from the runners registered today. A label is
-	// Windows-only when no non-Windows runner carries it too.
-	winOnly, other := map[string]bool{}, map[string]bool{}
-	for _, t := range targets {
-		rs, err := rest.ListRunners(ctx, t)
-		if err != nil {
-			continue
-		}
-		for _, r := range rs {
-			if isOurRunnerName(r.Name) {
-				continue
-			}
-			for _, l := range r.Labels {
-				if isDefaultLabel(l) {
-					continue
-				}
-				if !slices.Contains(rules.LegacyLabels, l) {
-					rules.LegacyLabels = append(rules.LegacyLabels, l)
-				}
-				if strings.EqualFold(r.OS, "windows") {
-					winOnly[l] = true
-				} else {
-					other[l] = true
-				}
-			}
-		}
-	}
-	for l := range winOnly {
-		if !other[l] && !slices.Contains(rules.WindowsLabels, l) {
-			rules.WindowsLabels = append(rules.WindowsLabels, l)
-		}
-	}
+	// Learn legacy labels only from runners on THIS host (root-owned units),
+	// with their registered labels from GitHub; other hosts' runners at the
+	// same org must not turn their labels into ours. A label is Windows-only
+	// when no non-Windows local runner carries it too.
+	learnLocalLabels(ctx, &rules, rest, targets, hostRoots)
 	plan, err := migrate.Scan(ctx, migrate.ScanInput{
 		Targets: targets, Rules: rules, GH: rest, Log: newLogger("warn"),
-		HostRoots: []string{"/home/*", "/opt", "/srv"},
+		HostRoots: hostRoots,
 	})
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 	printPlan(out, cfg, plan, o)
 	if o.dryRun {
-		return writeJSON(filepath.Join(os.TempDir(), "runner-warden-plan.json"), plan)
+		p, err := writePlanTemp(plan)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "plan written to %s\n", p)
+		return nil
 	}
 	if interactive && !confirm(out, in, "Apply this plan?") {
 		return errors.New("aborted")
@@ -273,15 +253,18 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 	if err := writeToken(cfg.GitHub.TokenFile, token); err != nil {
 		return err
 	}
+	cfgBefore, _ := os.ReadFile(config.Path(cfg.Instance))
 	if err := cfg.Save(config.Path(cfg.Instance)); err != nil {
 		return err
 	}
+	cfgAfter, _ := os.ReadFile(config.Path(cfg.Instance))
+	cfgChanged := !bytes.Equal(cfgBefore, cfgAfter)
 	fmt.Fprintf(out, "✅ config %s\n", config.Path(cfg.Instance))
 	if err := linux.EnsureSlice(naming.Slice(cfg.Instance), int64(cfg.Limits.MemoryBudget), int64(cfg.Limits.SwapMax)); err != nil {
 		return fmt.Errorf("slice: %w", err)
 	}
 	fmt.Fprintf(out, "✅ job slice %s (MemoryMax %s)\n", naming.Slice(cfg.Instance), units.BytesSize(float64(cfg.Limits.MemoryBudget)))
-	if err := installService(ctx, cfg.Instance); err != nil {
+	if err := installService(ctx, cfg.Instance, cfgChanged); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "✅ service runner-warden@%s enabled\n", cfg.Instance)
@@ -315,13 +298,16 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 	}
 	if o.retire && len(plan.Local) > 0 {
 		step(out, "Retire old local runners")
-		ret := &migrate.Retirer{StateDir: cfg.StateDir, Run: migrate.ExecRunner, API: rest, Log: newLogger("info")}
+		ret := &migrate.Retirer{StateDir: cfg.StateDir, Run: migrate.ExecRunner, API: rest, Log: newLogger("info"), Allowed: targets}
 		m, err := ret.Retire(ctx, plan.Local)
 		if err != nil {
 			return fmt.Errorf("retire: %w", err)
 		}
 		for _, r := range m.Runners {
-			fmt.Fprintf(out, "   %+v\n", r)
+			fmt.Fprintf(out, "   %s %s %s %s\n", r.Name, r.Dir, r.Status, r.Error)
+		}
+		for _, r := range m.Refused {
+			fmt.Fprintf(out, "   refused %s %s: %s\n", r.Name, r.Dir, r.Reason)
 		}
 		fmt.Fprintln(out, "   Busy runners stay pending; re-run `runner-warden migrate retire` later.")
 	}
@@ -393,6 +379,50 @@ func isOurRunnerName(name string) bool {
 
 var defaultLabels = []string{"self-hosted", "linux", "windows", "macos", "x64", "arm64", "arm", "x86"}
 
+// learnLocalLabels fills rules from the eligible local runners.
+func learnLocalLabels(ctx context.Context, rules *migrate.Rules, rest *gh.REST, targets []core.Target, hostRoots []string) {
+	locals, _ := migrate.ScanLocal("/", hostRoots, 0)
+	winOnly, other := map[string]bool{}, map[string]bool{}
+	for _, lr := range locals {
+		if !lr.Eligible || isOurRunnerName(lr.Name) {
+			continue
+		}
+		labels, osName := append([]string(nil), lr.Labels...), ""
+		if t, ok := migrate.TargetFromURL(lr.URL); ok && slices.Contains(targets, t) {
+			if rs, err := rest.ListRunners(ctx, t); err == nil {
+				for _, r := range rs {
+					if r.Name == lr.Name {
+						labels, osName = append(labels, r.Labels...), r.OS
+					}
+				}
+			}
+		}
+		bare := true
+		for _, l := range labels {
+			if migrate.IsDefaultLabel(l) {
+				continue
+			}
+			bare = false
+			if !slices.Contains(rules.LegacyLabels, l) {
+				rules.LegacyLabels = append(rules.LegacyLabels, l)
+			}
+			if strings.EqualFold(osName, "windows") {
+				winOnly[l] = true
+			} else {
+				other[l] = true
+			}
+		}
+		if bare {
+			rules.BareHost = true
+		}
+	}
+	for l := range winOnly {
+		if !other[l] && !slices.Contains(rules.WindowsLabels, l) {
+			rules.WindowsLabels = append(rules.WindowsLabels, l)
+		}
+	}
+}
+
 func isDefaultLabel(l string) bool { return slices.Contains(defaultLabels, strings.ToLower(l)) }
 
 func printPlan(w io.Writer, cfg *config.Config, p *migrate.Plan, o setupOpts) {
@@ -433,19 +463,34 @@ func printPlan(w io.Writer, cfg *config.Config, p *migrate.Plan, o setupOpts) {
 	fmt.Fprintln(w)
 }
 
-func installService(ctx context.Context, inst string) error {
+// installService writes the unit (only when it differs), enables the service
+// and starts it; it restarts only when the unit or config changed, so a
+// no-change re-run never interrupts running jobs.
+func installService(ctx context.Context, inst string, cfgChanged bool) error {
 	unit := "/etc/systemd/system/runner-warden@.service"
-	if cur, err := os.ReadFile(unit); err != nil || string(cur) != string(assets.SystemdUnit) {
+	unitChanged := false
+	if cur, err := os.ReadFile(unit); err != nil || !bytes.Equal(cur, assets.SystemdUnit) {
 		if err := os.WriteFile(unit, assets.SystemdUnit, 0o644); err != nil {
 			return err
 		}
+		unitChanged = true
 	}
-	for _, a := range [][]string{{"daemon-reload"}, {"enable", "runner-warden@" + inst}, {"restart", "runner-warden@" + inst}} {
+	for _, a := range serviceCommands(inst, unitChanged || cfgChanged) {
 		if out, err := exec.CommandContext(ctx, "systemctl", a...).CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(a, " "), err, out)
 		}
 	}
 	return nil
+}
+
+// serviceCommands lists the systemctl calls: restart when something changed,
+// else start (a no-op when already running).
+func serviceCommands(inst string, changed bool) [][]string {
+	verb := "start"
+	if changed {
+		verb = "restart"
+	}
+	return [][]string{{"daemon-reload"}, {"enable", "runner-warden@" + inst}, {verb, "runner-warden@" + inst}}
 }
 
 func waitDaemon(ctx context.Context, cfg *config.Config, timeout time.Duration) error {
@@ -502,6 +547,24 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o640)
+}
+
+// writePlanTemp writes the plan to a fresh, exclusively created 0600 file in
+// the temp dir (never a fixed, symlink-followable name) and returns its path.
+func writePlanTemp(v any) (string, error) {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "runner-warden-plan-*.json")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return "", err
+	}
+	return f.Name(), f.Close()
 }
 
 func step(w io.Writer, s string) { fmt.Fprintf(w, "\n== %s\n", s) }

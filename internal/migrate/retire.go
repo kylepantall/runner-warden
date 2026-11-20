@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -48,6 +46,11 @@ type Retirer struct {
 	API      RunnerAPI
 	Now      func() time.Time
 	Log      *slog.Logger
+	// Allowed is the explicit allow-list of targets whose runners may be
+	// retired; a runner registered anywhere else is refused. Empty refuses all.
+	Allowed []core.Target
+	// TrustedUID owns the unit files and runner dirs we trust (default 0 = root).
+	TrustedUID int
 }
 
 // Runner status in a manifest.
@@ -63,7 +66,7 @@ const (
 	StatusRolledBack RunnerStatus = "rolled_back"
 )
 
-// Steps, in order.
+// Steps, in order (idle check, deregister, then the local steps).
 const (
 	StepIdleCheck    = "idle_check"
 	StepStop         = "stop"
@@ -87,11 +90,28 @@ type RunnerRecord struct {
 	Error        string       `json:"error,omitempty"`
 }
 
+// Refusal is a runner Retire declined to touch.
+type Refusal struct {
+	Name   string `json:"name"`
+	Dir    string `json:"dir,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Reason string `json:"reason"`
+}
+
+// ReasonNotEligible and friends are Refusal reasons beyond the scan reasons.
+const (
+	ReasonNotEligible  = "not_eligible"
+	ReasonNotAllowed   = "target_not_allowed"
+	ReasonUnitMismatch = "unit_mismatch"
+	ReasonDirChanged   = "dir_changed"
+)
+
 // Manifest describes a retire session (manifest.json in the session dir).
 type Manifest struct {
 	Session   string         `json:"session"`
 	CreatedAt time.Time      `json:"createdAt"`
 	Runners   []RunnerRecord `json:"runners"`
+	Refused   []Refusal      `json:"refused,omitempty"` // from the latest Retire call
 }
 
 func (m *Manifest) open() bool {
@@ -186,22 +206,33 @@ func (r *Retirer) Retire(ctx context.Context, runners []LocalRunner) (*Manifest,
 	if err != nil {
 		return nil, err
 	}
+	var accepted []LocalRunner
+	var refused []Refusal
+	for _, lr := range runners {
+		if reason := r.vet(lr); reason != "" {
+			refused = append(refused, Refusal{Name: lr.Name, Dir: lr.Dir, URL: lr.URL, Reason: reason})
+			continue
+		}
+		accepted = append(accepted, lr)
+	}
 	if m == nil {
+		if len(accepted) == 0 {
+			return &Manifest{Refused: refused}, nil
+		}
 		ts := r.Now().UTC().Format("20060102T150405Z")
 		m = &Manifest{Session: filepath.Join(r.migrationDir(), ts), CreatedAt: r.Now().UTC()}
 		if err := os.MkdirAll(m.Session, 0o700); err != nil {
 			return nil, fmt.Errorf("create session dir: %w", err)
 		}
 	}
-	for _, lr := range runners {
+	m.Refused = refused
+	for _, lr := range accepted {
 		if m.find(lr) >= 0 {
 			continue
 		}
 		rec := RunnerRecord{LocalRunner: lr, Status: StatusPending}
 		rec.ArchiveDir = filepath.Join(m.Session, safeName(lr))
-		if t, ok := TargetFromURL(lr.URL); ok {
-			rec.Target = t
-		}
+		rec.Target, _ = TargetFromURL(lr.URL)
 		m.Runners = append(m.Runners, rec)
 	}
 	j, err := OpenJournal(filepath.Join(m.Session, "journal.jsonl"), r.Now)
@@ -249,6 +280,71 @@ func safeName(lr LocalRunner) string {
 	}, n)
 }
 
+// vet decides whether a runner may be retired: it must come from a root-owned
+// unit (Eligible), carry safe names, and be registered to an allowed target.
+func (r *Retirer) vet(lr LocalRunner) string {
+	switch {
+	case !lr.Eligible || lr.DirIno == 0:
+		return ReasonNotEligible
+	case !ValidIdent(lr.Name) || !ValidUnit(lr.Unit) || !ValidDir(lr.Dir):
+		return ReasonBadName
+	case lr.UnitPath != filepath.Join(SystemdDir, lr.Unit):
+		return ReasonUnitMismatch
+	}
+	if want, ok := expectedUnit(lr.URL, lr.Name); !ok || want != lr.Unit {
+		return ReasonUnitMismatch
+	}
+	t, ok := TargetFromURL(lr.URL)
+	if !ok || !r.allowed(t) {
+		return ReasonNotAllowed
+	}
+	return ""
+}
+
+func (r *Retirer) allowed(t core.Target) bool {
+	for _, a := range r.Allowed {
+		if strings.EqualFold(a.Owner, t.Owner) && strings.EqualFold(a.Repo, t.Repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkDir confirms an opened directory is the one recorded at scan time and
+// is owned by root or the unit's user.
+func (r *Retirer) checkDir(rec *RunnerRecord, fd int) error {
+	di, err := fstatDir(fd)
+	if err != nil {
+		return err
+	}
+	if rec.DirIno == 0 || di.Dev != rec.DirDev || di.Ino != rec.DirIno || di.UID != rec.DirUID ||
+		!ownerAllowed(di.UID, rec.User, r.TrustedUID) {
+		return errors.New(ReasonDirChanged)
+	}
+	return nil
+}
+
+// verifyUnit re-reads the root-owned unit and checks it still points at the
+// recorded dir and user.
+func (r *Retirer) verifyUnit(rec *RunnerRecord) error {
+	text, err := readUnit(r.Root, rec.Unit, r.TrustedUID)
+	if errors.Is(err, fs.ErrNotExist) {
+		if exists(filepath.Join(rec.ArchiveDir, "unit", rec.Unit)) {
+			rec.UnitArchived = true // moved by an interrupted earlier run
+			return nil
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if dirFromUnit(text) != rec.Dir || userFromUnit(text) != rec.User {
+		return errors.New(ReasonUnitMismatch)
+	}
+	return nil
+}
+
+func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
+
 // errPending stops a runner's steps without failing it.
 var errPending = errors.New("pending")
 
@@ -257,8 +353,8 @@ func (r *Retirer) retireOne(ctx context.Context, m *Manifest, rec *RunnerRecord,
 	if name == "" {
 		name = rec.Dir
 	}
-	step := func(s string, fn func() (string, error)) bool {
-		if j.Done(name, s) {
+	run := func(s string, always bool, fn func() (string, error)) bool {
+		if !always && j.Done(name, s) {
 			return true
 		}
 		detail, err := fn()
@@ -275,11 +371,35 @@ func (r *Retirer) retireOne(ctx context.Context, m *Manifest, rec *RunnerRecord,
 		_ = j.Append(name, s, StepOK, detail)
 		return true
 	}
+	step := func(s string, fn func() (string, error)) bool { return run(s, false, fn) }
 	rec.Status, rec.Error = StatusPending, ""
 
-	if !step(StepIdleCheck, func() (string, error) { return r.idleCheck(ctx, rec) }) {
+	if reason := r.vet(rec.LocalRunner); reason != "" {
+		rec.Status, rec.Error = StatusFailed, reason
+		return
+	}
+	if rec.Unit != "" && !rec.UnitArchived {
+		if err := r.verifyUnit(rec); err != nil {
+			rec.Status, rec.Error = StatusFailed, err.Error()
+			return
+		}
+	}
+
+	// The idle check repeats on every attempt until the runner is deregistered
+	// (after which GitHub assigns it no new jobs), so a resumed retire never
+	// acts on a stale "idle". Deregistering comes before stopping: GitHub
+	// refuses to delete a busy runner, which closes the check-then-stop gap.
+	if !j.Done(name, StepDeregister) {
+		if !run(StepIdleCheck, true, func() (string, error) { return r.idleCheck(ctx, rec) }) {
+			if rec.Status != StatusFailed {
+				rec.Status = StatusBusy
+			}
+			return
+		}
+	}
+	if !step(StepDeregister, func() (string, error) { return r.deregister(ctx, rec) }) {
 		if rec.Status != StatusFailed {
-			rec.Status = StatusBusy
+			rec.Status = StatusDeregister
 		}
 		return
 	}
@@ -303,12 +423,6 @@ func (r *Retirer) retireOne(ctx context.Context, m *Manifest, rec *RunnerRecord,
 		if !step(StepArchiveDir, func() (string, error) { return "", r.archiveDir(rec) }) {
 			return
 		}
-	}
-	if !step(StepDeregister, func() (string, error) { return r.deregister(ctx, rec) }) {
-		if rec.Status != StatusFailed {
-			rec.Status = StatusDeregister
-		}
-		return
 	}
 	rec.Status = StatusDone
 }
@@ -347,34 +461,68 @@ func (r *Retirer) idleCheck(ctx context.Context, rec *RunnerRecord) (string, err
 }
 
 func (r *Retirer) archiveUnit(rec *RunnerRecord) error {
-	src := r.real(rec.UnitPath)
-	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
-		return nil // already moved
+	if rec.UnitArchived {
+		return nil
 	}
-	if err := move(src, filepath.Join(rec.ArchiveDir, "unit", filepath.Base(rec.UnitPath))); err != nil {
+	ufd, err := openChain(r.Root, SystemdDir)
+	if err != nil {
 		return err
 	}
-	rec.UnitArchived = true
-	return nil
+	defer closeFd(ufd)
+	dfd, err := r.openArchive(rec, "unit")
+	if err != nil {
+		return err
+	}
+	defer closeFd(dfd)
+	err = renameAt(ufd, rec.Unit, dfd, rec.Unit)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // already moved
+	}
+	if err == nil {
+		rec.UnitArchived = true
+	}
+	return err
+}
+
+// openArchive opens (creating) <ArchiveDir>/<sub>, which lives in the state dir.
+func (r *Retirer) openArchive(rec *RunnerRecord, sub string) (int, error) {
+	p := filepath.Join(rec.ArchiveDir, sub)
+	if err := os.MkdirAll(p, 0o700); err != nil {
+		return -1, err
+	}
+	return openPlainDir(p)
 }
 
 func (r *Retirer) archiveDir(rec *RunnerRecord) error {
-	src := r.real(rec.Dir)
-	entries, err := os.ReadDir(src)
+	dirfd, err := openChain(r.Root, rec.Dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if e.Name() == "_work" {
+	defer closeFd(dirfd)
+	if err := r.checkDir(rec, dirfd); err != nil {
+		return err
+	}
+	names, err := listDirAt(dirfd)
+	if err != nil {
+		return err
+	}
+	sort.Strings(names)
+	afd, err := r.openArchive(rec, "dir")
+	if err != nil {
+		return err
+	}
+	defer closeFd(afd)
+	for _, n := range names {
+		if n == "_work" {
 			continue
 		}
-		if err := move(filepath.Join(src, e.Name()), filepath.Join(rec.ArchiveDir, "dir", e.Name())); err != nil {
+		if err := renameAt(dirfd, n, afd, n); err != nil {
 			return err
 		}
-		rec.MovedEntries = append(rec.MovedEntries, e.Name())
+		rec.MovedEntries = append(rec.MovedEntries, n)
 	}
 	return nil
 }
@@ -415,6 +563,7 @@ type ReRegister struct {
 	Token  string   `json:"-"` // registration token (short-lived); never journaled or persisted
 	// Args is the config.sh command line to run in Dir (contains the token).
 	Args []string `json:"-"`
+	Unit string   `json:"unit,omitempty"` // systemd unit to start afterwards
 	// NeedsRegistration is false when the runner was never deregistered.
 	NeedsRegistration bool `json:"needsRegistration"`
 }
@@ -442,10 +591,12 @@ func (r *Retirer) Rollback(ctx context.Context, manifestPath string) ([]ReRegist
 			name = rec.Dir
 		}
 		rname := "rollback:" + name
+		if err := r.validateRecord(m, rec); err != nil {
+			return out, fmt.Errorf("manifest record of %s: %w", name, err)
+		}
 		if rec.Status != StatusRolledBack {
 			if rec.UnitArchived && !j.Done(rname, "restore_unit") {
-				err := move(filepath.Join(rec.ArchiveDir, "unit", filepath.Base(rec.UnitPath)), r.real(rec.UnitPath))
-				if err != nil {
+				if err := r.restoreUnit(rec); err != nil {
 					_ = j.Append(rname, "restore_unit", StepError, err.Error())
 					return out, fmt.Errorf("restore unit of %s: %w", name, err)
 				}
@@ -453,19 +604,14 @@ func (r *Retirer) Rollback(ctx context.Context, manifestPath string) ([]ReRegist
 				reload = true
 			}
 			if !j.Done(rname, "restore_dir") {
-				for _, e := range rec.MovedEntries {
-					if err := move(filepath.Join(rec.ArchiveDir, "dir", e), filepath.Join(r.real(rec.Dir), e)); err != nil {
-						if errors.Is(err, fs.ErrNotExist) {
-							continue // already restored on a previous run
-						}
-						_ = j.Append(rname, "restore_dir", StepError, err.Error())
-						return out, fmt.Errorf("restore dir of %s: %w", name, err)
-					}
+				if err := r.restoreDir(rec); err != nil {
+					_ = j.Append(rname, "restore_dir", StepError, err.Error())
+					return out, fmt.Errorf("restore dir of %s: %w", name, err)
 				}
 				_ = j.Append(rname, "restore_dir", StepOK, "")
 			}
 		}
-		rr := ReRegister{Name: rec.Name, Dir: rec.Dir, URL: rec.URL, Labels: rec.Labels, NeedsRegistration: rec.Deregistered}
+		rr := ReRegister{Name: rec.Name, Dir: rec.Dir, Unit: rec.Unit, URL: rec.URL, Labels: rec.Labels, NeedsRegistration: rec.Deregistered}
 		if rec.Deregistered && r.API != nil && rec.Target.Owner != "" {
 			tok, err := r.API.CreateRegistrationToken(ctx, rec.Target)
 			if err != nil {
@@ -486,71 +632,76 @@ func (r *Retirer) Rollback(ctx context.Context, manifestPath string) ([]ReRegist
 	return out, r.save(m)
 }
 
-// ---- file moves ----
-
-// move renames src to dst, falling back to copy+remove across filesystems. It
-// refuses to overwrite.
-func move(src, dst string) error {
-	if _, err := os.Lstat(src); err != nil {
-		return err
+func (r *Retirer) validateRecord(m *Manifest, rec *RunnerRecord) error {
+	bad := errors.New("unsafe manifest record")
+	if rec.Name != "" && !ValidIdent(rec.Name) {
+		return bad
 	}
-	if _, err := os.Lstat(dst); err == nil {
-		return fmt.Errorf("destination exists: %w", fs.ErrExist)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	err := os.Rename(src, dst)
-	if err == nil {
-		return nil
-	}
-	var le *os.LinkError
-	if errors.As(err, &le) && errors.Is(le.Err, syscall.EXDEV) {
-		if err := copyTree(src, dst); err != nil {
-			_ = os.RemoveAll(dst)
-			return err
+	for _, l := range rec.Labels {
+		if !ValidIdent(l) {
+			return bad
 		}
-		return os.RemoveAll(src)
 	}
-	return err
+	if rec.Unit != "" && (!ValidUnit(rec.Unit) || rec.UnitPath != filepath.Join(SystemdDir, rec.Unit)) {
+		return bad
+	}
+	if rec.Dir != "" && !ValidDir(rec.Dir) {
+		return bad
+	}
+	for _, e := range rec.MovedEntries {
+		if !plainName(e) {
+			return bad
+		}
+	}
+	if rec.ArchiveDir != "" && filepath.Dir(rec.ArchiveDir) != filepath.Clean(m.Session) {
+		return bad
+	}
+	return nil
 }
 
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, p)
-		t := filepath.Join(dst, rel)
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case d.IsDir():
-			return os.MkdirAll(t, info.Mode().Perm())
-		case info.Mode()&os.ModeSymlink != 0:
-			l, err := os.Readlink(p)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(l, t)
-		case info.Mode().IsRegular():
-			in, err := os.Open(p)
-			if err != nil {
-				return err
-			}
-			defer in.Close()
-			out, err := os.OpenFile(t, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(out, in); err != nil {
-				out.Close()
-				return err
-			}
-			return out.Close()
-		}
+// restoreUnit puts the archived unit back. The destination directory is
+// opened without following symlinks and nothing is created or overwritten.
+func (r *Retirer) restoreUnit(rec *RunnerRecord) error {
+	dst, err := openChain(r.Root, SystemdDir)
+	if err != nil {
+		return err
+	}
+	defer closeFd(dst)
+	src, err := openPlainDir(filepath.Join(rec.ArchiveDir, "unit"))
+	if err != nil {
+		return err
+	}
+	defer closeFd(src)
+	return renameAt(src, rec.Unit, dst, rec.Unit)
+}
+
+// restoreDir puts archived entries back into the original runner dir, but only
+// if that dir is still the one recorded at scan time (same inode, no symlinks
+// on the path, expected owner). It never creates directories.
+func (r *Retirer) restoreDir(rec *RunnerRecord) error {
+	if len(rec.MovedEntries) == 0 {
 		return nil
-	})
+	}
+	src, err := openPlainDir(filepath.Join(rec.ArchiveDir, "dir"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // already restored on a previous run
+	}
+	if err != nil {
+		return err
+	}
+	defer closeFd(src)
+	dst, err := openChain(r.Root, rec.Dir)
+	if err != nil {
+		return err
+	}
+	defer closeFd(dst)
+	if err := r.checkDir(rec, dst); err != nil {
+		return err
+	}
+	for _, e := range rec.MovedEntries {
+		if err := renameAt(src, e, dst, e); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }

@@ -2,10 +2,12 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
 	gh "github.com/kylepantall/runner-warden/internal/github"
@@ -21,7 +23,8 @@ const (
 	ModePush  Mode = "push"  // commit straight to the default branch
 )
 
-// DefaultBranchName is the branch used in PR mode.
+// DefaultBranchName is the prefix of the branch used in PR mode; each run adds
+// a timestamp so it never reuses a branch someone else may have pre-seeded.
 const DefaultBranchName = "runner-warden/labels"
 
 // Writer is the REST surface Apply needs (implemented by *gh.REST).
@@ -33,6 +36,16 @@ type Writer interface {
 	UpdateVariable(ctx context.Context, scope core.Target, name, value string) error
 }
 
+// PRLister is optionally implemented by a Writer to report older open
+// runner-warden/labels* PRs, which Apply leaves alone.
+type PRLister interface {
+	ListOpenPRs(ctx context.Context, owner, repo, headPrefix string) ([]string, error)
+}
+
+// ErrBranchExists means the PR branch is already there; Apply never commits
+// onto a branch it did not create.
+var ErrBranchExists = errors.New("branch already exists")
+
 // ApplyOptions configures Apply.
 type ApplyOptions struct {
 	Mode Mode
@@ -41,7 +54,8 @@ type ApplyOptions struct {
 	// for every workflow that reads it, so do it only once the new scale sets
 	// are live.
 	UpdateVars bool
-	Branch     string // PR mode; default DefaultBranchName
+	Branch     string // PR mode; default DefaultBranchName-<yyyymmdd-hhmmss>
+	Now        func() time.Time
 	Message    string
 	Title      string
 	GH         Writer
@@ -59,6 +73,7 @@ type RepoResult struct {
 	Changed  bool     `json:"changed"` // a commit was made by this run
 	PRNumber int      `json:"prNumber,omitempty"`
 	PRURL    string   `json:"prUrl,omitempty"`
+	OpenPRs  []string `json:"openPrs,omitempty"` // older runner-warden/labels* PRs left alone
 	Error    string   `json:"error,omitempty"`
 }
 
@@ -85,8 +100,11 @@ func Apply(ctx context.Context, plan *Plan, opts ApplyOptions) (*ApplyResult, er
 	default:
 		return nil, fmt.Errorf("apply: unknown mode %q", opts.Mode)
 	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
 	if opts.Branch == "" {
-		opts.Branch = DefaultBranchName
+		opts.Branch = BranchName(opts.Now())
 	}
 	if opts.Message == "" {
 		opts.Message = "Use " + plan.Prefix + " runner labels"
@@ -159,8 +177,18 @@ func applyRepo(ctx context.Context, plan *Plan, r RepoScan, opts ApplyOptions) R
 		}
 	case ModePR:
 		rr.Branch = opts.Branch
-		if _, _, err := opts.GH.CreateBranch(ctx, r.Owner, r.Repo, opts.Branch, r.DefaultBranch); err != nil {
+		if l, ok := opts.GH.(PRLister); ok {
+			if urls, err := l.ListOpenPRs(ctx, r.Owner, r.Repo, DefaultBranchName); err == nil {
+				rr.OpenPRs = urls
+			}
+		}
+		_, created, err := opts.GH.CreateBranch(ctx, r.Owner, r.Repo, opts.Branch, r.DefaultBranch)
+		if err != nil {
 			rr.Error = err.Error()
+			return rr
+		}
+		if !created {
+			rr.Error = ErrBranchExists.Error()
 			return rr
 		}
 		sha, changed, err := opts.GH.CommitFiles(ctx, r.Owner, r.Repo, opts.Branch, opts.Message, files)
@@ -177,6 +205,11 @@ func applyRepo(ctx context.Context, plan *Plan, r RepoScan, opts ApplyOptions) R
 		rr.PRNumber, rr.PRURL = pr.Number, pr.URL
 	}
 	return rr
+}
+
+// BranchName is the per-run PR branch name.
+func BranchName(t time.Time) string {
+	return DefaultBranchName + "-" + t.UTC().Format("20060102-150405")
 }
 
 // prBody is a compact table of what changed and what was left alone.

@@ -29,7 +29,18 @@ type Rules struct {
 	// MacLabels are legacy labels that imply macOS (any label containing
 	// "macos" already does). macOS is not served yet: such values are skipped.
 	MacLabels []string `json:"macLabels,omitempty"`
+	// BareHost is true when a runner on this host carries only the default
+	// labels (self-hosted, Linux, X64, ...); only then is a runs-on made of
+	// defaults alone ours. LegacyLabels must come from this host's runners
+	// (plus explicit flags), never from other hosts at the same org.
+	BareHost bool `json:"bareHost,omitempty"`
 }
+
+var defaultLabelSet = []string{"self-hosted", "linux", "windows", "macos", "x64"}
+
+// IsDefaultLabel reports the implicit labels every runner of that OS carries.
+// Architecture and capability labels (ARM64, gpu, ...) are not defaults.
+func IsDefaultLabel(l string) bool { return containsFold(defaultLabelSet, l) }
 
 // Reason says why a runs-on occurrence was not rewritten (or what was
 // reported).
@@ -44,6 +55,8 @@ const (
 	ReasonMatrixUnresolved Reason = "matrix_unresolved"
 	ReasonGroupOnly        Reason = "group_without_labels"
 	ReasonParse            Reason = "parse_error"
+	ReasonForeignLabels    Reason = "foreign_labels" // runs-on needs labels no runner on this host has
+	ReasonMatrixKeyUsed    Reason = "matrix_key_used_elsewhere"
 	ReasonVarNotFound             = Reason("variable_not_found")  // referenced variable could not be read
 	ReasonVarNotLabels            = Reason("variable_not_labels") // variable value holds no legacy labels
 )
@@ -282,9 +295,12 @@ func containsFold(list []string, l string) bool {
 	return false
 }
 
-// classify reports whether labels are ours and the OS they map to.
-func (a *analyzer) classify(labels []string) (ours bool, os core.OS) {
-	var win, mac bool
+// classify reports whether labels are ours, the OS they map to, and whether
+// they also need a label no runner on this host has (foreign): moving such a
+// job to our pool would send it to the wrong machine.
+func (a *analyzer) classify(labels []string) (ours bool, os core.OS, foreign bool) {
+	var win, mac, extras bool
+	nonDefault := 0
 	for _, l := range labels {
 		if a.legacy(l) {
 			ours = true
@@ -296,6 +312,13 @@ func (a *analyzer) classify(labels []string) (ours bool, os core.OS) {
 		if strings.Contains(ll, "macos") || containsFold(a.rules.MacLabels, l) {
 			mac = true
 		}
+		if IsDefaultLabel(l) || a.ourLabel(l) {
+			continue
+		}
+		nonDefault++
+		if !containsFold(a.rules.LegacyLabels, l) && !containsFold(a.rules.WindowsLabels, l) && !containsFold(a.rules.MacLabels, l) {
+			extras = true
+		}
 	}
 	switch {
 	case win:
@@ -305,7 +328,13 @@ func (a *analyzer) classify(labels []string) (ours bool, os core.OS) {
 	default:
 		os = core.Linux
 	}
-	return ours, os
+	foreign = ours && (extras || (nonDefault == 0 && !a.rules.BareHost))
+	return ours, os, foreign
+}
+
+func (a *analyzer) ourLabel(l string) bool {
+	p := a.rules.Prefix
+	return p != "" && (l == p || strings.HasPrefix(l, p+"-"))
 }
 
 func (a *analyzer) newLabel(os core.OS) string { return naming.Label(a.rules.Prefix, os) }
@@ -350,9 +379,13 @@ func (a *analyzer) runsOn(j, n *yaml.Node) {
 
 // scalarLabel rewrites a literal scalar holding the given labels (one value).
 func (a *analyzer) scalarLabel(n *yaml.Node, labels []string, form Form) {
-	ours, os := a.classify(labels)
+	ours, os, foreign := a.classify(labels)
 	if !ours {
 		a.untouched = append(a.untouched, Untouched{Job: a.job_, Line: n.Line, Text: n.Value})
+		return
+	}
+	if foreign {
+		a.skip(n, ReasonForeignLabels, n.Value, "")
 		return
 	}
 	if os == core.MacOS {
@@ -393,10 +426,14 @@ func (a *analyzer) sequence(n *yaml.Node) {
 	if len(labels) == 0 {
 		return
 	}
-	ours, os := a.classify(labels)
+	ours, os, foreign := a.classify(labels)
 	first := n.Content[0]
 	if !ours {
 		a.untouched = append(a.untouched, Untouched{Job: a.job_, Line: first.Line, Text: strings.Join(labels, ", ")})
+		return
+	}
+	if foreign {
+		a.skip(first, ReasonForeignLabels, strings.Join(labels, ", "), "")
 		return
 	}
 	if hasExpr {
@@ -569,11 +606,15 @@ func (a *analyzer) expressionLiteral(n *yaml.Node, l literal) {
 	if ls, ok := jsonLabels(l.value); ok {
 		labels, form, asJSON = ls, FormExpressionJSON, true
 	}
-	ours, os := a.classify(labels)
+	ours, os, foreign := a.classify(labels)
 	if !ours {
 		return
 	}
 	at := &yaml.Node{Line: n.Line, Column: n.Column}
+	if foreign {
+		a.skip(at, ReasonForeignLabels, l.value, "")
+		return
+	}
 	if os == core.MacOS {
 		a.skip(at, ReasonMacOS, l.value, "")
 		return
@@ -611,6 +652,7 @@ func (a *analyzer) matrixKey(j, at *yaml.Node, key string) {
 		return
 	}
 	found := false
+	before := len(a.changes)
 	visit := func(v *yaml.Node) {
 		found = true
 		switch v.Kind {
@@ -627,16 +669,46 @@ func (a *analyzer) matrixKey(j, at *yaml.Node, key string) {
 	if v := mapGet(matrix, key); v != nil && key != "include" && key != "exclude" {
 		visit(v)
 	}
-	if inc := mapGet(matrix, "include"); inc != nil && inc.Kind == yaml.SequenceNode {
-		for _, e := range inc.Content {
-			if v := mapGet(e, key); v != nil {
-				visit(v)
+	for _, list := range []string{"include", "exclude"} {
+		if inc := mapGet(matrix, list); inc != nil && inc.Kind == yaml.SequenceNode {
+			for _, e := range inc.Content {
+				if v := mapGet(e, key); v != nil {
+					visit(v)
+				}
 			}
 		}
 	}
 	if !found {
 		a.skip(at, ReasonMatrixUnresolved, "matrix."+key, "")
+		return
 	}
+	if len(a.changes) > before {
+		a.reportMatrixRefs(j, at, matrix, key)
+	}
+}
+
+// reportMatrixRefs reports every other use of matrix.<key> in the job (an
+// `if:` or a step that compares the old value would now be wrong).
+func (a *analyzer) reportMatrixRefs(j, runsOn, matrix *yaml.Node, key string) {
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil || n == runsOn || n == matrix {
+			return
+		}
+		if n.Kind == yaml.ScalarNode {
+			for _, m := range matrixRE.FindAllStringSubmatch(n.Value, -1) {
+				if m[1] == key {
+					a.skip(n, ReasonMatrixKeyUsed, n.Value, "")
+					break
+				}
+			}
+			return
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	walk(j)
 }
 
 func (a *analyzer) matrixValue(n *yaml.Node) {
@@ -649,8 +721,12 @@ func (a *analyzer) matrixValue(n *yaml.Node) {
 	if ls, ok := jsonLabels(n.Value); ok {
 		labels, form, asJSON = ls, FormMatrixJSON, true
 	}
-	ours, os := a.classify(labels)
+	ours, os, foreign := a.classify(labels)
 	if !ours {
+		return
+	}
+	if foreign {
+		a.skip(n, ReasonForeignLabels, n.Value, "")
 		return
 	}
 	if os == core.MacOS {
@@ -685,14 +761,14 @@ func RewriteVarValue(value string, rules Rules) (string, bool) {
 	a := &analyzer{rules: rules}
 	t := strings.TrimSpace(value)
 	if ls, ok := jsonLabels(t); ok {
-		ours, os := a.classify(ls)
-		if !ours || os == core.MacOS {
+		ours, os, foreign := a.classify(ls)
+		if !ours || foreign || os == core.MacOS {
 			return "", false
 		}
 		return `"` + a.newLabel(os) + `"`, true
 	}
-	ours, os := a.classify([]string{t})
-	if !ours || os == core.MacOS {
+	ours, os, foreign := a.classify([]string{t})
+	if !ours || foreign || os == core.MacOS {
 		return "", false
 	}
 	return a.newLabel(os), true

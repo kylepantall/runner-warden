@@ -29,7 +29,7 @@ func TestScanLocal(t *testing.T) {
 	mk(t, root, "opt/r2/.runner", `{"agentName":"r2","gitHubUrl":"https://github.com/acme"}`)
 	mk(t, root, "srv/a/b/c/d/.runner", `{"agentName":"too-deep"}`)
 
-	got, err := ScanLocal(root, nil)
+	got, err := ScanLocal(root, nil, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

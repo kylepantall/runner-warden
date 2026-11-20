@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,15 +50,14 @@ func newRetireEnv(t *testing.T) *retireEnv {
 	f.runners["acme/app"] = []gh.Runner{{ID: 11, Name: "box-1", Labels: []string{"self-hosted", "general"}}}
 	cmds := &cmdLog{}
 	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
-	r := &Retirer{Root: root, StateDir: state, Run: cmds.run, API: f, Now: func() time.Time { return now }}
-	locals, _ := ScanLocal(root, nil)
+	r := &Retirer{Root: root, StateDir: state, Run: cmds.run, API: f, Now: func() time.Time { return now },
+		Allowed: []core.Target{{Owner: "acme", Repo: "app"}}, TrustedUID: os.Getuid()}
+	locals, _ := ScanLocal(root, nil, os.Getuid())
 	if len(locals) != 1 {
 		t.Fatalf("locals %+v", locals)
 	}
 	return &retireEnv{root, state, f, cmds, r, locals[0]}
 }
-
-func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
 
 func TestRetireArchivesAndRollbackRestores(t *testing.T) {
 	e := newRetireEnv(t)
@@ -137,7 +137,9 @@ func TestRetireBusyThenResume(t *testing.T) {
 	if m.Runners[0].Status != StatusDeregister || m.Runners[0].Deregistered {
 		t.Fatalf("%+v", m.Runners[0])
 	}
-	stops := e.cmds.count("systemctl stop")
+	if e.cmds.count("systemctl stop") != 0 {
+		t.Fatal("must not stop before deregistering")
+	}
 	e.f.busyDel[11] = false
 	m2, err := e.r.Retire(ctx, []LocalRunner{e.runner})
 	if err != nil {
@@ -146,8 +148,8 @@ func TestRetireBusyThenResume(t *testing.T) {
 	if m2.Session != m.Session || m2.Runners[0].Status != StatusDone || len(e.f.deleted) != 1 {
 		t.Fatalf("%+v deleted=%v", m2.Runners[0], e.f.deleted)
 	}
-	if e.cmds.count("systemctl stop") != stops {
-		t.Fatal("resume repeated completed steps")
+	if e.cmds.count("systemctl stop") != 1 {
+		t.Fatal("stop must run exactly once")
 	}
 }
 
@@ -169,14 +171,183 @@ func TestRetireFailsClosedWhenGitHubUnreachable(t *testing.T) {
 	}
 }
 
-func TestMoveRefusesOverwrite(t *testing.T) {
+func TestRenameAtRefusesOverwrite(t *testing.T) {
 	d := t.TempDir()
 	mk(t, d, "a", "1")
 	mk(t, d, "b", "2")
-	if err := move(filepath.Join(d, "a"), filepath.Join(d, "b")); err == nil {
-		t.Fatal("want error")
+	fd, err := openPlainDir(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(fd)
+	if err := renameAt(fd, "a", fd, "b"); !errors.Is(err, fs.ErrExist) {
+		t.Fatal("want ErrExist, got", err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(d, "b")); string(b) != "2" {
 		t.Fatal("destination clobbered")
+	}
+}
+
+func (e *retireEnv) retire(t *testing.T) *Manifest {
+	t.Helper()
+	m, err := e.r.Retire(context.Background(), []LocalRunner{e.runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestRetireRefusesSymlinkedRunnerDir(t *testing.T) {
+	e := newRetireEnv(t)
+	victim := filepath.Join(e.root, "etc/victim")
+	mk(t, e.root, "etc/victim/passwd", "x")
+	dir := filepath.Join(e.root, "home/ci/actions-runner")
+	if err := os.Rename(dir, dir+".real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, dir); err != nil {
+		t.Fatal(err)
+	}
+	m := e.retire(t)
+	if m.Runners[0].Status != StatusFailed || !exists(filepath.Join(victim, "passwd")) {
+		t.Fatalf("%+v", m.Runners[0])
+	}
+}
+
+func TestRetireRefusesSwappedInode(t *testing.T) {
+	e := newRetireEnv(t)
+	dir := filepath.Join(e.root, "home/ci/actions-runner")
+	if err := os.Rename(dir, dir+".old"); err != nil {
+		t.Fatal(err)
+	}
+	mk(t, e.root, "home/ci/actions-runner/config.sh", "new")
+	m := e.retire(t)
+	if m.Runners[0].Status != StatusFailed || !exists(filepath.Join(dir, "config.sh")) {
+		t.Fatalf("%+v", m.Runners[0])
+	}
+}
+
+func TestRetireRefusesSymlinkedParent(t *testing.T) {
+	e := newRetireEnv(t)
+	home := filepath.Join(e.root, "home/ci")
+	mk(t, e.root, "etc/victim/actions-runner/keep", "x")
+	if err := os.Rename(home, home+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(e.root, "etc/victim"), home); err != nil {
+		t.Fatal(err)
+	}
+	m := e.retire(t)
+	if m.Runners[0].Status != StatusFailed || !exists(filepath.Join(e.root, "etc/victim/actions-runner/keep")) {
+		t.Fatalf("%+v", m.Runners[0])
+	}
+}
+
+func TestRetireRefusesNonTargetAndIneligible(t *testing.T) {
+	e := newRetireEnv(t)
+	e.r.Allowed = []core.Target{{Owner: "other"}}
+	m := e.retire(t)
+	if len(m.Runners) != 0 || len(m.Refused) != 1 || m.Refused[0].Reason != ReasonNotAllowed || len(e.cmds.calls) != 0 {
+		t.Fatalf("%+v", m)
+	}
+	e.r.Allowed = []core.Target{{Owner: "acme", Repo: "app"}}
+	lr := e.runner
+	lr.Eligible = false
+	m, _ = e.r.Retire(context.Background(), []LocalRunner{lr})
+	if len(m.Runners) != 0 || m.Refused[0].Reason != ReasonNotEligible {
+		t.Fatalf("%+v", m)
+	}
+	e.r.Allowed = nil
+	if m = e.retire(t); len(m.Runners) != 0 {
+		t.Fatal("empty allow-list must refuse everything")
+	}
+}
+
+func TestScanOnlyUnitRunnersAreEligible(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "home/mallory/r/.runner", `{"agentName":"prod-1","gitHubUrl":"https://github.com/acme/app"}`)
+	got, _ := ScanLocal(root, nil, os.Getuid())
+	if len(got) != 1 || got[0].Eligible {
+		t.Fatalf("%+v", got)
+	}
+	// unit whose name does not match the .runner file
+	mk(t, root, "etc/systemd/system/actions.runner.acme-app.box-1.service", "[Service]\nWorkingDirectory=/home/mallory/r\n")
+	got, _ = ScanLocal(root, nil, os.Getuid())
+	for _, l := range got {
+		if l.Eligible {
+			t.Fatalf("mismatched name must not be eligible: %+v", l)
+		}
+	}
+}
+
+func TestScanUnitFromWrongOwnerNotEligible(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "etc/systemd/system/actions.runner.acme-app.box-1.service", unitText)
+	mk(t, root, "home/ci/actions-runner/.runner", `{"agentName":"box-1","gitHubUrl":"https://github.com/acme/app"}`)
+	got, _ := ScanLocal(root, nil, os.Getuid()+1)
+	for _, l := range got {
+		if l.Eligible {
+			t.Fatalf("%+v", l)
+		}
+	}
+}
+
+func TestRollbackRefusesSymlinkedDestination(t *testing.T) {
+	e := newRetireEnv(t)
+	m := e.retire(t)
+	dir := filepath.Join(e.root, "home/ci/actions-runner")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(e.root, "etc/profile.d")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, dir); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.r.Rollback(context.Background(), filepath.Join(m.Session, "manifest.json"))
+	if err == nil {
+		t.Fatal("want refusal")
+	}
+	if ents, _ := os.ReadDir(victim); len(ents) != 0 {
+		t.Fatalf("files escaped into symlink target: %v", ents)
+	}
+}
+
+func TestRollbackRefusesSwappedInode(t *testing.T) {
+	e := newRetireEnv(t)
+	m := e.retire(t)
+	dir := filepath.Join(e.root, "home/ci/actions-runner")
+	if err := os.Rename(dir, dir+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.Rollback(context.Background(), filepath.Join(m.Session, "manifest.json")); err == nil {
+		t.Fatal("want refusal")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatal("restored into a different directory")
+	}
+}
+
+func TestIdleCheckRepeatsUntilDeregistered(t *testing.T) {
+	e := newRetireEnv(t)
+	e.f.busyDel[11] = true
+	e.retire(t)
+	e.f.runners["acme/app"][0].Busy = true
+	m := e.retire(t)
+	if m.Runners[0].Status != StatusBusy || e.cmds.count("systemctl stop") != 0 {
+		t.Fatalf("%+v %v", m.Runners[0], e.cmds.calls)
+	}
+}
+
+func TestValidIdent(t *testing.T) {
+	for s, want := range map[string]bool{"box-1": true, "a.b_c": true, "": false, "a b": false, "$(x)": false, "a\"b": false, "x;y": false} {
+		if ValidIdent(s) != want {
+			t.Errorf("%q", s)
+		}
 	}
 }

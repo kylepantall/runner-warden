@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
 )
@@ -60,11 +61,12 @@ func TestApplyPrintPRPushIdempotent(t *testing.T) {
 		t.Fatalf("diff: %s", res.Repos[0].Diff)
 	}
 	// pr: branch + one commit + PR, vars untouched without the flag
-	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f})
-	if err != nil || res.Repos[0].Error != "" || !res.Repos[0].Changed || res.Repos[0].PRNumber != 1 || res.Repos[0].Branch != DefaultBranchName {
+	branch := BranchName(fixedNow())
+	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f, Now: fixedNow})
+	if err != nil || res.Repos[0].Error != "" || !res.Repos[0].Changed || res.Repos[0].PRNumber != 1 || res.Repos[0].Branch != branch {
 		t.Fatalf("pr: %+v %v", res, err)
 	}
-	if got := f.branches["acme/app@"+DefaultBranchName][".github/workflows/ci.yml"]; got != wfNew {
+	if got := f.branches["acme/app@"+branch][".github/workflows/ci.yml"]; got != wfNew {
 		t.Fatalf("branch content %q", got)
 	}
 	if f.files["acme/app"][".github/workflows/ci.yml"] != wfOld {
@@ -73,11 +75,16 @@ func TestApplyPrintPRPushIdempotent(t *testing.T) {
 	if f.vars["acme|CI_RUNNER"] != `["self-hosted","isolink"]` {
 		t.Fatal("var changed without flag")
 	}
-	// second run: same branch/PR reused, no new commit
+	// same branch again: refused, nothing committed onto it
 	commits := f.commits
-	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f})
-	if err != nil || res.Repos[0].Changed || res.Repos[0].PRNumber != 1 || f.commits != commits || len(f.prs) != 1 {
+	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f, Now: fixedNow})
+	if err != nil || res.Repos[0].Error == "" || f.commits != commits || len(f.prs) != 1 {
 		t.Fatalf("rerun: %+v %v", res, err)
+	}
+	// later run: fresh branch
+	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f, Now: func() time.Time { return fixedNow().Add(time.Minute) }})
+	if err != nil || res.Repos[0].Error != "" || res.Repos[0].Branch == branch || len(f.prs) != 2 {
+		t.Fatalf("later: %+v %v", res, err)
 	}
 	// push + vars
 	res, err = Apply(ctx, plan, ApplyOptions{Mode: ModePush, GH: f, UpdateVars: true})
@@ -92,6 +99,26 @@ func TestApplyPrintPRPushIdempotent(t *testing.T) {
 	res, _ = Apply(ctx, plan, ApplyOptions{Mode: ModePush, GH: f, UpdateVars: true})
 	if len(res.Vars) != 1 || res.Vars[0].Updated || res.Vars[0].Error == "" || f.vars["acme|CI_RUNNER"] != "someone-else" {
 		t.Fatalf("drift: %+v", res.Vars)
+	}
+}
+
+func fixedNow() time.Time { return time.Date(2026, 11, 20, 10, 11, 12, 0, time.UTC) }
+
+func TestBranchNameUniquePerRun(t *testing.T) {
+	a, b := BranchName(fixedNow()), BranchName(fixedNow().Add(time.Second))
+	if a == b || !strings.HasPrefix(a, DefaultBranchName+"-") || a == DefaultBranchName {
+		t.Fatal(a, b)
+	}
+}
+
+func TestApplyPRRefusesPreSeededBranch(t *testing.T) {
+	ctx := context.Background()
+	f, in := fixture()
+	plan, _ := Scan(ctx, in)
+	f.branches["acme/app@"+BranchName(fixedNow())] = map[string]string{".github/workflows/ci.yml": "evil"}
+	res, _ := Apply(ctx, plan, ApplyOptions{Mode: ModePR, GH: f, Now: fixedNow})
+	if res.Repos[0].Error == "" || f.commits != 0 || len(f.prs) != 0 {
+		t.Fatalf("%+v", res.Repos[0])
 	}
 }
 

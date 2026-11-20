@@ -18,8 +18,10 @@ type ScanInput struct {
 	Rules     Rules // Prefix required
 	HostRoots []string
 	Root      string // filesystem root for host scanning; default "/"
-	GH        GitHub
-	Log       *slog.Logger
+	// TrustedUID owns the unit files and runner dirs we trust (default 0 = root).
+	TrustedUID int
+	GH         GitHub
+	Log        *slog.Logger
 	// Concurrency bounds parallel repo scans (default 4).
 	Concurrency int
 	Now         func() time.Time
@@ -72,7 +74,7 @@ func Scan(ctx context.Context, in ScanInput) (*Plan, error) {
 		repos[t.String()] = gh.Repo{Owner: t.Owner, Name: t.Repo, DefaultBranch: db}
 	}
 
-	local, err := ScanLocal(in.Root, in.HostRoots)
+	local, err := ScanLocal(in.Root, in.HostRoots, in.TrustedUID)
 	if err != nil {
 		return nil, err
 	}
