@@ -321,7 +321,7 @@ func (c *Config) ApplyDefaults() {
 
 	def(&c.Windows.Image, "dockurr/windows")
 	def(&c.Windows.SSHUser, "runner")
-	def(&c.Windows.SSHKeyFile, filepath.Join(EtcDir, c.Instance, "windows_ed25519"))
+	def(&c.Windows.SSHKeyFile, filepath.Join(c.StateDir, "windows", "id_ed25519"))
 	def(&c.Windows.RunnerDir, `C:\actions-runner`)
 	def(&c.Windows.WorkDir, `C:\rw`)
 	defDur(&c.Windows.IdleTTL, 15*time.Minute)
