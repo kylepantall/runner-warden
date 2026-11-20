@@ -1,0 +1,21 @@
+name: expr
+on: [pull_request]
+jobs:
+  fork:
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'my-ci-linux' }}
+    steps: []
+  fromjson:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"my-ci-linux"') }}
+    steps: []
+  varonly:
+    runs-on: ${{ vars.TEST_RUNNER_NAME || 'ubuntu-latest' }}
+    steps: []
+  compare:
+    runs-on: ${{ inputs.runner == 'self-hosted' && 'ubuntu-latest' || 'ubuntu-22.04' }}
+    steps: []
+  fncall:
+    runs-on: ${{ contains(github.ref, 'general') && 'ubuntu-latest' || 'ubuntu-22.04' }}
+    steps: []
+  winjson:
+    runs-on: ${{ fromJSON('"my-ci-windows"') }}
+    steps: []
