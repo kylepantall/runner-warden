@@ -24,6 +24,21 @@ Spike code: [`spike/m0`](m0/) — throwaway listener on `actions/scaleset` v0.5.
 | Cleanup permissions | ⚠️ Runner dirs end up owned by the job uid; manager cleanup must run as root or via a helper container |
 | Org runner groups | ℹ️ Orgs may have several groups; scale sets need an explicit group id (default = 1) |
 
+## Job-selection spike (E1–E9)
+
+| # | Experiment | Result |
+|---|---|---|
+| E1 | `maxCapacity=1`, 4 jobs queued, no runners | ✅ Only 1 job assigned; the rest stay queued on GitHub, unannounced |
+| E2 | `maxCapacity=0` | ✅ Nothing assigned to that scale set |
+| E3 | Pick a non-head job via `AcquireJobs` | ❌ Impossible: `JobAvailable` is never delivered |
+| E4 | Raise capacity live | ✅ Next job assigned FIFO, effective at the next poll (≤ 50 s) |
+| E5 | Runners started one by one | ✅ Each runner receives the oldest assigned-unstarted job (strict FIFO) |
+| E6 | Assigned job with no runner | ✅ Waiting in the queue does **not** count toward `timeout-minutes` (1-min-timeout job waited ≈4 min, passed). ⚠️ Every 5 min: `JobCompleted{canceled, runner ""}` + `JobAssigned` again (reassign churn); held ≥ 15 min with no failure |
+| E7a | Runner killed 5 s after start | It was already bound: offline + busy, `DELETE` → 422. After 5 min GitHub rebinds; job then succeeds on another runner |
+| E7b | Runner killed mid-job | Job cancelled by GitHub after ≈14 min, not retried |
+| E8 | Two scale sets sharing one label | ✅ Allowed (extra label). Job routed to the set with capacity |
+| E9 | Message vs REST identity | Messages carry `workflowRunId`, `eventName`, job name, labels; `JobID` is a GUID → match REST by run id + name |
+
 ## Plan changes
 
 | Area | Change |

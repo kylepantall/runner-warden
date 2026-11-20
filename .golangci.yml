@@ -1,0 +1,15 @@
+version: "2"
+linters:
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+  settings:
+    gosec:
+      excludes:
+        - G204 # subprocesses are intentional (systemctl, ssh)
+  exclusions:
+    paths:
+      - spike/
