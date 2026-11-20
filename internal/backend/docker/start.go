@@ -24,7 +24,10 @@ const hookDir = "rw-hooks"
 // entrypoint copies the runner install into the per-runner dir (which exists at
 // the same path on the host, so job containers can bind-mount _work/externals
 // by host path) and starts it. cp -RP, not -a: ownership is set by the runner uid.
-const entrypoint = `set -e; cp -RP /home/runner/. "$1"; cd "$1"; exec ./run.sh`
+//
+// The JIT config arrives as a 0400 file in that dir (so it never shows in
+// `docker inspect`), is read into the environment and deleted first thing.
+const entrypoint = `set -e; J="$1/.jit"; ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat "$J"); rm -f "$J"; export ACTIONS_RUNNER_INPUT_JITCONFIG; cp -RP /home/runner/. "$1"; cd "$1"; exec ./run.sh`
 
 func mkdirAll(p string) error { return os.MkdirAll(p, 0o755) }
 
@@ -88,14 +91,13 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	for k, v := range spec.Env {
 		env[k] = v
 	}
-	env["ACTIONS_RUNNER_INPUT_JITCONFIG"] = spec.JITConfig
+	env["DOCKER_HOST"] = "unix://" + sock
 	env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = started
 	env["ACTIONS_RUNNER_HOOK_JOB_COMPLETED"] = completed
 	env["RUNNER_WARDEN_SOCKET"] = filepath.Join(b.hookDir(spec.Name), "hook.sock")
 	env["RUNNER_WARDEN_RUNNER"] = spec.Name
 
 	binds := []string{
-		bind(sock, "/var/run/docker.sock", false),
 		bind(dir, dir, false),
 		bind(c.HookBinary, c.HookBinary, true),
 		bind(b.hookDir(spec.Name), b.hookDir(spec.Name), false),
@@ -170,6 +172,20 @@ func (b *Backend) prepareDir(dir string) error {
 	return nil
 }
 
+// writeJIT leaves the JIT config for the entrypoint: readable by the runner
+// uid only, and removed by the entrypoint as soon as it is read.
+func (b *Backend) writeJIT(dir, jit string) error {
+	p := filepath.Join(dir, ".jit")
+	if err := os.WriteFile(p, []byte(jit), 0o400); err != nil {
+		return err
+	}
+	if err := os.Chown(p, b.runnerOwner(), -1); err != nil {
+		// Not root (tests, rootless): the dir is world-usable then, so is this.
+		return os.Chmod(p, 0o444)
+	}
+	return nil
+}
+
 func (b *Backend) runnerOwner() int {
 	if b.cfg.RunnerUID > 0 {
 		return b.cfg.RunnerUID
@@ -199,11 +215,15 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 		b.log.Warn("docker socket gid unknown", "socket", b.cfg.DockerSocket, "error", err.Error())
 		gid = 0
 	}
-	if err := b.startProxy(spec.Name, sock); err != nil {
+	if err := b.writeJIT(dir, spec.JITConfig); err != nil {
 		_ = b.Cleanup(ctx, spec.Name)
 		return core.Handle{}, err
 	}
 	cfg, hc := b.buildRunnerContainer(spec, dir, sock, gid)
+	if err := b.startProxy(spec.Name, sock, b.allowedFromBinds(spec.Name, hc.Binds)...); err != nil {
+		_ = b.Cleanup(ctx, spec.Name)
+		return core.Handle{}, err
+	}
 	created, err := b.api.ContainerCreate(ctx, cfg, hc, &network.NetworkingConfig{}, nil, spec.Name)
 	if err == nil {
 		err = b.api.ContainerStart(ctx, created.ID, container.StartOptions{})
@@ -215,15 +235,15 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 	return core.Handle{RunnerName: spec.Name, BackendID: created.ID, StartedAt: time.Now()}, nil
 }
 
-func (b *Backend) startProxy(runner, sock string) error {
-	if err := mkdirAll(b.runnersDir()); err != nil {
+func (b *Backend) startProxy(runner, sock string, allowed ...string) error {
+	if err := mkdirAll(filepath.Dir(sock)); err != nil {
 		return err
 	}
 	p, err := dockerproxy.New(dockerproxy.Config{
 		Socket: sock, Upstream: b.cfg.DockerSocket,
 		Runner: runner, Instance: b.cfg.Instance, HostID: b.cfg.HostID,
 		Slice: b.cfg.Slice, OOMScoreAdj: b.cfg.OOMScoreAdj,
-		CacheBinds: b.cfg.CacheBinds, CacheEnv: b.cfg.CacheEnv,
+		CacheBinds: b.cfg.CacheBinds, CacheEnv: b.cfg.CacheEnv, AllowedBinds: allowed,
 		Log: b.log,
 	})
 	if err != nil {

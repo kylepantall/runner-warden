@@ -84,15 +84,22 @@ func TestRunnerLifecycle(t *testing.T) {
 	if ok, _ := s.SetRunnerState("r1", RunnerRunning); !ok {
 		t.Fatal("state")
 	}
-	if ok, _ := s.SetRunnerJob("r1", "acme/app", 55, "build"); !ok {
+	if ok, _ := s.SetRunnerJob("r1", RunnerJob{Repo: "acme/app", RunID: 55, Name: "build", JobID: "jid", WorkflowRef: "acme/app/.github/workflows/ci.yml@refs/heads/main", Event: "push"}); !ok {
 		t.Fatal("job")
 	}
 	if ok, _ := s.SetRunnerState("nope", RunnerIdle); ok {
 		t.Fatal("missing runner")
 	}
 	got, ok, err := s.GetRunner("r1")
-	if err != nil || !ok || got.State != RunnerRunning || got.JobRunID != 55 || got.JobName != "build" || got.Lane != 3 || !got.Created.Equal(base) {
+	if err != nil || !ok || got.State != RunnerRunning || got.JobRunID != 55 || got.JobName != "build" || got.JobID != "jid" || got.JobEvent != "push" || got.JobWorkflowRef == "" || got.Lane != 3 || !got.Created.Equal(base) {
 		t.Fatalf("%+v %v %v", got, ok, err)
+	}
+	// A backend-id update must not wipe the job fields.
+	if ok, _ := s.SetRunnerBackendID("r1", "newid"); !ok {
+		t.Fatal("backend id")
+	}
+	if got, _, _ := s.GetRunner("r1"); got.BackendID != "newid" || got.JobID != "jid" || got.State != RunnerRunning {
+		t.Fatalf("%+v", got)
 	}
 	if _, ok, _ := s.GetRunner("zzz"); ok {
 		t.Fatal("absent")

@@ -34,7 +34,7 @@ type Daemon struct {
 	hostID string
 
 	sets     []*gh.ScaleSets // one per lane index: a ScaleSets keeps one set per key
-	rest     *gh.REST
+	rest     githubAPI
 	backends map[core.OS]core.Backend
 	win      WindowsPool // nil unless windows is enabled
 	sched    *scheduler.Scheduler
@@ -46,7 +46,37 @@ type Daemon struct {
 	listeners map[scheduler.LaneKey]*gh.Listener
 	capacity  map[scheduler.LaneKey]int
 	runners   map[string]*runnerRec
-	events    map[int64]string // run id -> event name, for stale-PR checks
+	starting  map[string]bool    // runner names being started: not orphans yet
+	events    map[int64]eventRec // run id -> event name, for stale-PR checks
+	evPruned  time.Time
+}
+
+// eventRec remembers a run's event; entries expire (a run's first job
+// finishing must not drop the event for its sibling jobs).
+type eventRec struct {
+	event string
+	seen  time.Time
+}
+
+const eventTTL = 6 * time.Hour
+
+// githubAPI is the REST surface the daemon uses.
+type githubAPI interface {
+	ListRunners(ctx context.Context, t core.Target) ([]gh.Runner, error)
+	DeleteRunner(ctx context.Context, t core.Target, id int64) error
+	GetRun(ctx context.Context, owner, repo string, runID int64) (gh.Run, error)
+	CancelRun(ctx context.Context, owner, repo string, runID int64) error
+	ForceCancelRun(ctx context.Context, owner, repo string, runID int64) error
+	RerunJob(ctx context.Context, owner, repo string, runID int64, jobName string) error
+	PRsForCommit(ctx context.Context, owner, repo, sha, branch string) ([]gh.PRState, error)
+	BranchExists(ctx context.Context, owner, repo, branch string) (bool, error)
+	TagExists(ctx context.Context, owner, repo, tag string) (bool, error)
+}
+
+// adopter is implemented by backends whose per-runner plumbing (the Docker
+// proxy) lives in the daemon process and must be rebuilt for adopted runners.
+type adopter interface {
+	Adopt(ctx context.Context, h core.Handle) error
 }
 
 type runnerRec struct {
@@ -65,6 +95,7 @@ type runnerRec struct {
 	owner    string
 	repo     string
 	killed   bool
+	goneAt   time.Time // when the runner died or was stopped by us
 }
 
 // Options are the inputs main provides.
@@ -119,7 +150,8 @@ func New(o Options) (*Daemon, error) {
 		listeners: map[scheduler.LaneKey]*gh.Listener{},
 		capacity:  map[scheduler.LaneKey]int{},
 		runners:   map[string]*runnerRec{},
-		events:    map[int64]string{},
+		starting:  map[string]bool{},
+		events:    map[int64]eventRec{},
 	}
 	d.backends, d.win, err = o.MakeBackends(meta.HostID)
 	if err != nil {
@@ -147,6 +179,10 @@ func New(o Options) (*Daemon, error) {
 	so.Observer = d
 	if d.win != nil {
 		so.VMs = d.win
+		so.VMCost = func(l scheduler.LaneKey) (int64, bool) {
+			_, mem, up := d.win.Peek(l.Target)
+			return mem, up
+		}
 	}
 	if cores, err := admission.ReadTopology(""); err == nil {
 		so.Cores = cores
@@ -179,7 +215,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.ensureScaleSets(ctx); err != nil {
 		return err
 	}
-	d.restore(ctx)
+	if err := d.restore(ctx); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
 
 	ctrl, err := hookapi.ListenControl(config.SocketPath(d.cfg.Instance), d.cfg.ControlGroup)
 	if err != nil {
@@ -277,9 +315,23 @@ type laneEvents struct {
 	lane scheduler.LaneKey
 }
 
+// noteEvent records a run's event and drops expired ones. d.mu is held.
+func (d *Daemon) noteEvent(runID int64, event string) {
+	now := time.Now()
+	d.events[runID] = eventRec{event: event, seen: now}
+	if now.Sub(d.evPruned) > time.Minute {
+		d.evPruned = now
+		for id, e := range d.events {
+			if now.Sub(e.seen) > eventTTL {
+				delete(d.events, id)
+			}
+		}
+	}
+}
+
 func (e laneEvents) Assigned(k core.ScaleSetKey, j core.Job) {
 	e.d.mu.Lock()
-	e.d.events[j.RunID] = j.Event
+	e.d.noteEvent(j.RunID, j.Event)
 	e.d.mu.Unlock()
 	e.d.sched.Assigned(k, e.lane.Lane, j)
 }
@@ -293,7 +345,9 @@ func (e laneEvents) Started(k core.ScaleSetKey, j core.Job) {
 		rr.activeAt = time.Now()
 	}
 	e.d.mu.Unlock()
-	_, _ = e.d.store.SetRunnerJob(j.RunnerName, j.Owner+"/"+j.Repo, j.RunID, j.Name)
+	_, _ = e.d.store.SetRunnerJob(j.RunnerName, store.RunnerJob{
+		Repo: j.Owner + "/" + j.Repo, RunID: j.RunID, Name: j.Name, JobID: j.JobID, WorkflowRef: j.WorkflowRef, Event: j.Event,
+	})
 	_, _ = e.d.store.SetRunnerState(j.RunnerName, "running")
 	e.d.sched.Started(k, e.lane.Lane, j)
 }
@@ -321,6 +375,15 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		return "", fmt.Errorf("no backend for %s", l.OS)
 	}
 	name := naming.RunnerName(d.cfg.Prefix, d.hostID)
+	// Slow starts (a Windows VM coming up) must not look like orphans.
+	d.mu.Lock()
+	d.starting[name] = true
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.starting, name)
+		d.mu.Unlock()
+	}()
 	spec := core.RunnerSpec{
 		Name:     name,
 		ScaleSet: l.ScaleSetKey,
@@ -378,10 +441,16 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		}
 		return "", fmt.Errorf("start runner: %w", err)
 	}
-	rec.BackendID, rec.State = h.BackendID, "idle"
-	_ = d.store.UpsertRunner(rec)
+	_, _ = d.store.SetRunnerBackendID(name, h.BackendID)
+	rr := &runnerRec{name: name, lane: l, ghID: ghID, handle: h, started: now, vm: vm, activeAt: now}
+	// A job may have started before we registered the runner (the Started
+	// event only updated the store then).
+	if sr, ok, _ := d.store.GetRunner(name); ok && sr.JobRunID != 0 {
+		owner, repo, _ := strings.Cut(sr.JobRepo, "/")
+		rr.jobAt, rr.runID, rr.owner, rr.repo = time.Now(), sr.JobRunID, owner, repo
+	}
 	d.mu.Lock()
-	d.runners[name] = &runnerRec{name: name, lane: l, ghID: ghID, handle: h, started: now, vm: vm, activeAt: now}
+	d.runners[name] = rr
 	d.mu.Unlock()
 	d.log.Info("runner started", "runner", name, "lane", l.Lane, "target", l.Target.String(), "os", string(l.OS), "mem", g.MemBytes, "parked", g.Parked, "cpuset", g.CPUSet)
 	return name, nil
@@ -451,7 +520,6 @@ func (d *Daemon) JobFinished(r scheduler.JobResult) {
 	}
 	var peak int64
 	d.mu.Lock()
-	delete(d.events, r.Job.RunID)
 	d.mu.Unlock()
 	if err := d.store.AddJob(store.JobRecord{
 		Owner: r.Job.Owner, Repo: r.Job.Repo, Workflow: admission.WorkflowFile(r.Job.WorkflowRef), Job: r.Job.Name,
@@ -462,11 +530,13 @@ func (d *Daemon) JobFinished(r scheduler.JobResult) {
 	d.log.Info("job finished", "owner", r.Job.Owner, "repo", r.Job.Repo, "job", r.Job.Name, "run_id", r.Job.RunID, "result", r.Result, "runner", r.Runner, "duration", dur.String())
 }
 
-// restore adopts runners that survived a restart and removes the rest.
-func (d *Daemon) restore(ctx context.Context) {
+// restore adopts runners that survived a restart and removes the rest. Any
+// failure to read the store or a backend aborts it: acting on a partial view
+// would force-remove live runners.
+func (d *Daemon) restore(ctx context.Context) error {
 	recs, err := d.store.ListRunners()
 	if err != nil {
-		d.log.Error("list stored runners failed", "error", err.Error())
+		return fmt.Errorf("list stored runners: %w", err)
 	}
 	byName := map[string]store.Runner{}
 	valid := recs[:0:0]
@@ -484,8 +554,7 @@ func (d *Daemon) restore(ctx context.Context) {
 	for os, b := range d.backends {
 		hs, err := b.List(ctx)
 		if err != nil {
-			d.log.Error("list backend runners failed", "os", string(os), "error", err.Error())
-			continue
+			return fmt.Errorf("list %s runners: %w", os, err)
 		}
 		for _, h := range hs {
 			if !d.validRunner(h.RunnerName) {
@@ -499,13 +568,16 @@ func (d *Daemon) restore(ctx context.Context) {
 				continue
 			}
 			// Only adopt runners still running; exited ones finished (or died)
-			// while we were down and GitHub has already settled their job.
-			if u, err := b.Stats(ctx, h); err != nil || !u.Alive {
+			// while we were down and GitHub has already settled their job. A
+			// stats error says nothing about liveness: adopt, the monitor
+			// rechecks.
+			if u, err := b.Stats(ctx, h); err == nil && !u.Alive {
 				continue
 			}
 			live[h.RunnerName] = h
 		}
 	}
+	busy := d.busyRunners(ctx, recs, live)
 	var restored []scheduler.RestoredRunner
 	for _, r := range recs {
 		lane := scheduler.LaneKey{ScaleSetKey: core.ScaleSetKey{Target: core.Target{Owner: r.Owner, Repo: r.Repo, RunnerGroup: d.groupFor(r.Owner, r.Repo)}, OS: core.OS(r.OS)}, Lane: r.Lane}
@@ -514,25 +586,66 @@ func (d *Daemon) restore(ctx context.Context) {
 			_ = d.StopRunner(ctx, r.Name)
 			continue
 		}
-		rr := &runnerRec{name: r.Name, lane: lane, ghID: r.GitHubRunnerID, handle: h, started: r.Created, activeAt: time.Now()}
-		var job *core.Job
-		if r.JobRunID != 0 {
-			owner, repo, _ := strings.Cut(r.JobRepo, "/")
-			job = &core.Job{RunID: r.JobRunID, Name: r.JobName, Owner: owner, Repo: repo, RunnerName: r.Name, ScaleSet: lane.ScaleSetKey}
-			rr.jobAt, rr.runID, rr.owner, rr.repo = time.Now(), r.JobRunID, owner, repo
+		if a, ok := d.backends[lane.OS].(adopter); ok {
+			if err := a.Adopt(ctx, h); err != nil {
+				d.log.Error("adopting runner failed", "runner", r.Name, "error", err.Error())
+			}
 		}
 		if err := d.startHookSocket(lane.OS, r.Name); err != nil {
 			d.log.Error("hook socket for adopted runner failed", "runner", r.Name, "error", err.Error())
 		}
+		rr := &runnerRec{name: r.Name, lane: lane, ghID: r.GitHubRunnerID, handle: h, started: r.Created, activeAt: time.Now()}
+		var job *core.Job
+		if r.JobRunID != 0 {
+			owner, repo, _ := strings.Cut(r.JobRepo, "/")
+			job = &core.Job{
+				JobID: r.JobID, RunID: r.JobRunID, Name: r.JobName, Owner: owner, Repo: repo,
+				WorkflowRef: r.JobWorkflowRef, Event: r.JobEvent, RunnerName: r.Name, ScaleSet: lane.ScaleSetKey,
+			}
+			rr.jobAt, rr.runID, rr.owner, rr.repo = time.Now(), r.JobRunID, owner, repo
+		} else if busy[r.Name] {
+			// Took a job while we were down; the scheduler binds it from the hook.
+			rr.jobAt = time.Now()
+		}
 		d.mu.Lock()
 		d.runners[r.Name] = rr
+		if job != nil && job.Event != "" {
+			d.noteEvent(job.RunID, job.Event)
+		}
 		d.mu.Unlock()
-		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil})
+		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil || busy[r.Name]})
 	}
 	if len(restored) > 0 {
 		d.log.Info("adopted runners after restart", "count", len(restored))
 	}
 	d.sched.Restore(restored)
+	return nil
+}
+
+// busyRunners asks GitHub which adopted runners with no recorded job are
+// busy (they took a job while the daemon was down). Lookup failures count as
+// not busy.
+func (d *Daemon) busyRunners(ctx context.Context, recs []store.Runner, live map[string]core.Handle) map[string]bool {
+	out := map[string]bool{}
+	targets := map[core.Target]bool{}
+	for _, r := range recs {
+		if _, ok := live[r.Name]; ok && r.JobRunID == 0 {
+			targets[core.Target{Owner: r.Owner, Repo: r.Repo}] = true
+		}
+	}
+	for t := range targets {
+		rs, err := d.rest.ListRunners(ctx, t)
+		if err != nil {
+			d.log.Warn("busy check failed", "target", t.String(), "error", err.Error())
+			continue
+		}
+		for _, x := range rs {
+			if x.Busy {
+				out[x.Name] = true
+			}
+		}
+	}
+	return out
 }
 
 func (d *Daemon) groupFor(owner, repo string) string {

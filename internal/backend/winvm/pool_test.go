@@ -655,3 +655,25 @@ func TestPSQuoting(t *testing.T) {
 		t.Fatal(winJoin(`C:\rw\`, "x", `\y`))
 	}
 }
+
+func TestPeekDoesNotClaim(t *testing.T) {
+	f := newFixture(t, 2)
+	tgt := core.Target{Owner: "o"}
+	if vm, mem, up := f.pool.Peek(tgt); vm == "" || up || mem <= 0 {
+		t.Fatalf("cold peek: %q %d %v", vm, mem, up)
+	}
+	f.setUp("b", time.Now())
+	if vm, mem, up := f.pool.Peek(tgt); vm != "b" || !up || mem != f.pool.MemFor("b") {
+		t.Fatalf("warm peek: %q %d %v", vm, mem, up)
+	}
+	if vm, ok := f.pool.Pick(tgt); !ok || vm != "b" {
+		t.Fatalf("peek must not have claimed b: %q %v", vm, ok)
+	}
+	// Claimed: no longer reported as an idle running VM.
+	if vm, _, up := f.pool.Peek(tgt); vm == "b" || up {
+		t.Fatalf("claimed VM peeked as idle: %q %v", vm, up)
+	}
+	if vm, mem, up := f.pool.Peek(core.Target{Owner: "x"}); vm != "" && up || mem < 0 {
+		t.Fatalf("%q", vm)
+	}
+}

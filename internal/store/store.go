@@ -41,6 +41,9 @@ var migrations = []string{
 	   ts INTEGER NOT NULL, kind TEXT NOT NULL, step TEXT NOT NULL,
 	   status TEXT NOT NULL, data TEXT NOT NULL DEFAULT ''
 	 );`,
+	`ALTER TABLE runners ADD COLUMN job_id TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE runners ADD COLUMN job_workflow_ref TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE runners ADD COLUMN job_event TEXT NOT NULL DEFAULT '';`,
 }
 
 // SchemaVersion is the newest schema this build writes.
@@ -191,15 +194,18 @@ type Runner struct {
 	JobRunID       int64
 	JobName        string
 	JobRepo        string // owner/repo of the job
+	JobID          string // service job id
+	JobWorkflowRef string
+	JobEvent       string
 }
 
-const runnerCols = `name, owner, repo, os, lane, backend, backend_id, github_runner_id, state, created, job_run_id, job_name, job_repo`
+const runnerCols = `name, owner, repo, os, lane, backend, backend_id, github_runner_id, state, created, job_run_id, job_name, job_repo, job_id, job_workflow_ref, job_event`
 
 // UpsertRunner inserts or replaces a runner record.
 func (s *Store) UpsertRunner(r Runner) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO runners(`+runnerCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO runners(`+runnerCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.Name, r.Owner, r.Repo, r.OS, r.Lane, r.Backend, r.BackendID, r.GitHubRunnerID, r.State,
-		r.Created.UnixNano(), r.JobRunID, r.JobName, r.JobRepo)
+		r.Created.UnixNano(), r.JobRunID, r.JobName, r.JobRepo, r.JobID, r.JobWorkflowRef, r.JobEvent)
 	return err
 }
 
@@ -209,9 +215,29 @@ func (s *Store) SetRunnerState(name, state string) (bool, error) {
 	return affected(res, err)
 }
 
+// RunnerJob is the job a runner took.
+type RunnerJob struct {
+	Repo        string // owner/repo
+	RunID       int64
+	Name        string
+	JobID       string
+	WorkflowRef string
+	Event       string
+}
+
 // SetRunnerJob records the job a runner took.
-func (s *Store) SetRunnerJob(name, repo string, runID int64, job string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE runners SET job_repo=?, job_run_id=?, job_name=? WHERE name=?`, repo, runID, job, name)
+func (s *Store) SetRunnerJob(name string, j RunnerJob) (bool, error) {
+	res, err := s.db.Exec(`UPDATE runners SET job_repo=?, job_run_id=?, job_name=?, job_id=?, job_workflow_ref=?, job_event=? WHERE name=?`,
+		j.Repo, j.RunID, j.Name, j.JobID, j.WorkflowRef, j.Event, name)
+	return affected(res, err)
+}
+
+// SetRunnerBackendID records the backend handle once a runner started. A
+// "starting" runner becomes idle; any later state (a job already started) and
+// the job fields are left alone.
+func (s *Store) SetRunnerBackendID(name, backendID string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE runners SET backend_id=?, state=CASE WHEN state=? THEN ? ELSE state END WHERE name=?`,
+		backendID, RunnerStarting, RunnerIdle, name)
 	return affected(res, err)
 }
 
@@ -233,7 +259,7 @@ func scanRunner(sc interface{ Scan(...any) error }) (Runner, error) {
 	var r Runner
 	var created int64
 	err := sc.Scan(&r.Name, &r.Owner, &r.Repo, &r.OS, &r.Lane, &r.Backend, &r.BackendID, &r.GitHubRunnerID,
-		&r.State, &created, &r.JobRunID, &r.JobName, &r.JobRepo)
+		&r.State, &created, &r.JobRunID, &r.JobName, &r.JobRepo, &r.JobID, &r.JobWorkflowRef, &r.JobEvent)
 	r.Created = time.Unix(0, created)
 	return r, err
 }

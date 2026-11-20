@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,10 @@ type Config struct {
 	// CacheBinds ("host:container[:opts]") and CacheEnv go to runner and jobs.
 	CacheBinds []string
 	CacheEnv   map[string]string
+
+	// AllowedBinds are extra host paths jobs may bind-mount (besides the
+	// runner dir, cache paths and the runner's own mounts).
+	AllowedBinds []string
 
 	Log *slog.Logger
 }
@@ -137,7 +142,11 @@ func (b *Backend) hookDir(n string) string { return filepath.Join(b.cfg.HookDir,
 
 func (b *Backend) runnersDir() string        { return filepath.Join(b.cfg.StateDir, "runners") }
 func (b *Backend) runnerDir(n string) string { return filepath.Join(b.runnersDir(), n) }
-func (b *Backend) proxySock(n string) string { return filepath.Join(b.runnersDir(), n+".sock") }
+
+// proxySock lives inside the runner dir, which is bind-mounted as a directory:
+// the runner keeps reaching a re-created socket after a daemon restart (a
+// file bind would pin the old, deleted inode).
+func (b *Backend) proxySock(n string) string { return filepath.Join(b.runnerDir(n), "dp.sock") }
 
 // Caps implements core.Backend. Job memory is bounded by the slice, not per
 // container, so MemLimits is false.
@@ -271,4 +280,38 @@ func (g poolGate) InFlight() int {
 		n += p.InFlightPulls()
 	}
 	return n
+}
+
+// Adopt restarts the runner's Docker proxy after a daemon restart, on the same
+// socket path inside the runner dir, so the adopted runner keeps its Docker.
+func (b *Backend) Adopt(ctx context.Context, h core.Handle) error {
+	if !b.validName(h.RunnerName) {
+		return errors.New("invalid runner name")
+	}
+	var binds []string
+	if h.BackendID != "" {
+		ci, err := b.api.ContainerInspect(ctx, h.BackendID)
+		if err != nil {
+			return err
+		}
+		if ci.HostConfig != nil {
+			binds = ci.HostConfig.Binds
+		}
+	}
+	return b.startProxy(h.RunnerName, b.proxySock(h.RunnerName), b.allowedFromBinds(h.RunnerName, binds)...)
+}
+
+// allowedFromBinds is the set of host paths a job may mount: the runner dir,
+// operator-allowed paths and the host side of the runner's own mounts, minus
+// what must stay private (hook binary and dir, the proxy socket).
+func (b *Backend) allowedFromBinds(runner string, binds []string) []string {
+	out := append([]string{b.runnerDir(runner)}, b.cfg.AllowedBinds...)
+	skip := map[string]bool{b.cfg.HookBinary: true, b.hookDir(runner): true, b.proxySock(runner): true}
+	for _, bd := range binds {
+		src, _, _ := strings.Cut(bd, ":")
+		if src != "" && !skip[src] {
+			out = append(out, src)
+		}
+	}
+	return out
 }

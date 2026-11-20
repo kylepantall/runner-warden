@@ -69,6 +69,7 @@ func daemonCmd() *cobra.Command {
 							OOMScoreAdj:  cfg.Linux.OOMScoreAdj,
 							HookBinary:   exe,
 							HookDir:      daemon.HookDir(cfg.Instance),
+							AllowedBinds: cfg.Linux.AllowedBinds,
 							CacheBinds:   binds,
 							CacheEnv:     env,
 							Log:          log.With("backend", "linux"),

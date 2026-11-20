@@ -300,6 +300,18 @@ func (r *REST) BranchExists(ctx context.Context, owner, repo, branch string) (bo
 	return false, wrap("get branch", resp, err)
 }
 
+// TagExists reports whether a tag exists.
+func (r *REST) TagExists(ctx context.Context, owner, repo, tag string) (bool, error) {
+	_, resp, err := r.c.Git.GetRef(ctx, owner, repo, "tags/"+tag)
+	if err == nil {
+		return true, nil
+	}
+	if status(resp) == http.StatusNotFound {
+		return false, nil
+	}
+	return false, wrap("get tag", resp, err)
+}
+
 // Repo is the subset of repository metadata needed for scanning.
 type Repo struct {
 	Owner         string

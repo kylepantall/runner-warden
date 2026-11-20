@@ -53,8 +53,11 @@ type Config struct {
 	OOMScoreAdj int               // HostConfig.OomScoreAdj for job containers
 	CacheBinds  []string          // "host:container[:opts]" appended to job containers
 	CacheEnv    map[string]string // env appended to job containers
-	MaxBody     int64             // 0 = DefaultMaxBody
-	Log         *slog.Logger      // nil = discard
+	// AllowedBinds are host paths (and everything under them) a job may
+	// bind-mount; anything else outside named volumes is refused.
+	AllowedBinds []string
+	MaxBody      int64        // 0 = DefaultMaxBody
+	Log          *slog.Logger // nil = discard
 }
 
 // Proxy is a running per-runner proxy.
@@ -63,11 +66,13 @@ type Proxy struct {
 	log *slog.Logger
 	srv *http.Server
 	rp  *httputil.ReverseProxy
+	up  *http.Client // inspect calls to the real daemon
 
 	mu       sync.Mutex
 	pauses   int
 	resumeCh chan struct{} // closed when pauses drops to 0; non-nil while paused
 	inflight int
+	owned    map[string]ownedEntry
 	closed   chan struct{}
 	once     sync.Once
 }
@@ -95,14 +100,16 @@ func New(cfg Config) (*Proxy, error) {
 	}
 	p := &Proxy{cfg: cfg, log: log, closed: make(chan struct{})}
 	upstream := cfg.Upstream
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", upstream)
+	}}
+	p.up = &http.Client{Transport: tr}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&url.URL{Scheme: "http", Host: "docker"})
 			r.Out.Host = "docker"
 		},
-		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", upstream)
-		}},
+		Transport:     tr,
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.Warn("proxy upstream error", "runner", cfg.Runner, "error", err.Error())
@@ -131,6 +138,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.log.Warn("proxy denied endpoint", "runner", p.cfg.Runner)
 		http.Error(w, "endpoint not allowed", http.StatusForbidden)
 		return
+	}
+	if status, err := p.authorize(r); status != 0 {
+		p.log.Warn("proxy refused request", "runner", p.cfg.Runner, "status", status)
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		defer p.forget()
 	}
 	if r.Method == http.MethodPost && buildPath.MatchString(r.URL.Path) {
 		if err := p.rewriteBuild(r); err != nil {
@@ -240,6 +255,11 @@ func (p *Proxy) rewrite(w http.ResponseWriter, r *http.Request, kind string) (in
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &doc); err != nil || doc == nil {
 			return http.StatusBadRequest, errors.New("malformed JSON body")
+		}
+	}
+	if kind == "containers" {
+		if err := p.checkContainerRefs(r.Context(), doc); err != nil {
+			return http.StatusForbidden, err
 		}
 	}
 	doc["Labels"] = p.stampLabels(doc["Labels"], "job")

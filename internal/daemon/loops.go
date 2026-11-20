@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -15,6 +14,7 @@ type WindowsPool interface {
 	core.Backend
 	scheduler.VMProbe
 	Pick(t core.Target) (vm string, ok bool)
+	Peek(t core.Target) (vm string, mem int64, up bool)
 	Release(vm string)
 	EnsureUp(ctx context.Context, vm string) error
 	WorkFolder(vm, runner string) string
@@ -45,9 +45,23 @@ func (d *Daemon) monitor(ctx context.Context) error {
 	}
 }
 
+// reapAfter is how long a dead runner may stay tracked before the daemon
+// reaps it itself (the scheduler normally does, on the job's Completed event).
+const reapAfter = 5 * time.Minute
+
 func (d *Daemon) check(ctx context.Context, rr *runnerRec) {
 	b := d.backends[rr.lane.OS]
-	if b == nil || rr.killed {
+	if b == nil {
+		return
+	}
+	d.mu.Lock()
+	killed, goneAt := rr.killed, rr.goneAt
+	d.mu.Unlock()
+	if killed {
+		if !goneAt.IsZero() && time.Since(goneAt) > reapAfter {
+			d.log.Warn("reaping runner the scheduler never reaped", "runner", rr.name)
+			_ = d.StopRunner(ctx, rr.name)
+		}
 		return
 	}
 	u, err := b.Stats(ctx, rr.handle)
@@ -57,25 +71,31 @@ func (d *Daemon) check(ctx context.Context, rr *runnerRec) {
 	}
 	now := time.Now()
 	if !u.Alive {
-		rr.killed = true
+		d.mu.Lock()
+		rr.killed, rr.goneAt = true, now
+		runID := rr.runID
+		d.mu.Unlock()
 		if u.OOMKills > 0 {
-			d.log.Warn("runner exited after oom kill", "runner", rr.name, "oom_kills", u.OOMKills, "run_id", rr.runID)
+			d.log.Warn("runner exited after oom kill", "runner", rr.name, "oom_kills", u.OOMKills, "run_id", runID)
 		}
 		d.sched.RunnerDied(rr.name, u.OOMKills > 0)
 		return
 	}
+	d.mu.Lock()
 	if u.CPUSeconds-rr.lastCPU > 0.15*monitorEvery.Seconds() || u.LogBytes != rr.lastLog || u.IOBytes != rr.lastIO {
 		rr.activeAt = now
 	}
 	rr.lastCPU, rr.lastLog, rr.lastIO = u.CPUSeconds, u.LogBytes, u.IOBytes
-	if rr.jobAt.IsZero() {
+	jobAt, activeAt := rr.jobAt, rr.activeAt
+	d.mu.Unlock()
+	if jobAt.IsZero() {
 		return
 	}
 	reason := ""
 	switch {
-	case now.Sub(rr.jobAt) > d.cfg.Hang.MaxDuration.D():
+	case now.Sub(jobAt) > d.cfg.Hang.MaxDuration.D():
 		reason = "max_duration"
-	case now.Sub(rr.activeAt) > d.cfg.Hang.Idle.D():
+	case now.Sub(activeAt) > d.cfg.Hang.Idle.D():
 		reason = "idle"
 	}
 	if reason != "" {
@@ -83,27 +103,16 @@ func (d *Daemon) check(ctx context.Context, rr *runnerRec) {
 	}
 }
 
-// killHung cancels the run, then stops the runner. GitHub's Completed event
-// lets the scheduler reap it; no re-run is attempted.
+// killHung stops the runner (and its job containers) only. It does not cancel
+// the run: that would take down the job's matrix siblings, and GitHub fails
+// just this job once its runner is gone. The scheduler reaps on Completed.
 func (d *Daemon) killHung(ctx context.Context, rr *runnerRec, reason string) {
-	rr.killed = true
-	d.log.Warn("killing hung job", "runner", rr.name, "reason", reason, "run_id", rr.runID, "owner", rr.owner, "repo", rr.repo,
-		"job_age", time.Since(rr.jobAt).String(), "idle_for", time.Since(rr.activeAt).String())
-	if rr.runID != 0 {
-		if err := d.rest.CancelRun(ctx, rr.owner, rr.repo, rr.runID); err != nil {
-			d.log.Warn("cancel run failed", "run_id", rr.runID, "error", err.Error())
-		}
-		go func() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(60 * time.Second):
-			}
-			if run, err := d.rest.GetRun(ctx, rr.owner, rr.repo, rr.runID); err == nil && run.Status != "completed" {
-				_ = d.rest.ForceCancelRun(ctx, rr.owner, rr.repo, rr.runID)
-			}
-		}()
-	}
+	d.mu.Lock()
+	rr.killed, rr.goneAt = true, time.Now()
+	runID, owner, repo, jobAt, activeAt := rr.runID, rr.owner, rr.repo, rr.jobAt, rr.activeAt
+	d.mu.Unlock()
+	d.log.Warn("killing hung job", "runner", rr.name, "reason", reason, "run_id", runID, "owner", owner, "repo", repo,
+		"job_age", time.Since(jobAt).String(), "idle_for", time.Since(activeAt).String())
 	if b := d.backends[rr.lane.OS]; b != nil {
 		if err := b.Stop(ctx, rr.handle, 15*time.Second); err != nil {
 			d.log.Warn("stop hung runner failed", "runner", rr.name, "error", err.Error())
@@ -130,7 +139,6 @@ func (d *Daemon) reconcileLoop(ctx context.Context) error {
 }
 
 func (d *Daemon) reconcile(ctx context.Context) {
-	ours := d.cfg.Prefix + "-" + d.hostID + "-"
 	seen := map[core.Target]bool{}
 	for _, l := range d.lanes {
 		if seen[l.Target] {
@@ -143,13 +151,14 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			continue
 		}
 		for _, r := range rs {
-			if !strings.HasPrefix(r.Name, ours) || r.Busy || r.Status != "offline" {
+			if !d.validRunner(r.Name) || r.Busy || r.Status != "offline" {
 				continue
 			}
 			d.mu.Lock()
 			_, tracked := d.runners[r.Name]
+			starting := d.starting[r.Name]
 			d.mu.Unlock()
-			if tracked {
+			if tracked || starting {
 				continue
 			}
 			if _, ok, _ := d.store.GetRunner(r.Name); ok {
@@ -173,8 +182,9 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			}
 			d.mu.Lock()
 			_, tracked := d.runners[h.RunnerName]
+			starting := d.starting[h.RunnerName]
 			d.mu.Unlock()
-			if tracked {
+			if tracked || starting {
 				continue
 			}
 			if time.Since(h.StartedAt) < 2*time.Minute { // starting right now
@@ -217,52 +227,13 @@ func (d *Daemon) staleCheck(ctx context.Context) {
 	for _, l := range snap.Lanes {
 		for _, j := range l.Jobs {
 			if j.RunID != 0 {
-				runs[j.RunID] = run{owner: j.Owner, repo: j.Repo, id: j.RunID, event: d.events[j.RunID]}
+				runs[j.RunID] = run{owner: j.Owner, repo: j.Repo, id: j.RunID, event: d.events[j.RunID].event}
 			}
 		}
 	}
 	d.mu.Unlock()
 	for _, r := range runs {
-		reason := ""
-		switch r.event {
-		case "pull_request", "pull_request_target":
-			if !d.cfg.Stale.CancelClosedPRs {
-				continue
-			}
-			info, err := d.rest.GetRun(ctx, r.owner, r.repo, r.id)
-			if err != nil {
-				continue
-			}
-			prs, err := d.rest.PRsForCommit(ctx, r.owner, r.repo, info.HeadSHA, info.HeadBranch)
-			if err != nil {
-				continue
-			}
-			for _, pr := range prs {
-				if !pr.Closed {
-					continue
-				}
-				// Runs created after the close are deliberate (types: [closed]).
-				if !pr.ClosedAt.IsZero() && info.CreatedAt.After(pr.ClosedAt) {
-					continue
-				}
-				reason = "pr_closed"
-				if pr.Merged {
-					reason = "pr_merged"
-				}
-			}
-		case "push":
-			if !d.cfg.Stale.CancelDeletedBranch {
-				continue
-			}
-			info, err := d.rest.GetRun(ctx, r.owner, r.repo, r.id)
-			if err != nil || info.HeadBranch == "" {
-				continue
-			}
-			exists, err := d.rest.BranchExists(ctx, r.owner, r.repo, info.HeadBranch)
-			if err == nil && !exists {
-				reason = "branch_deleted"
-			}
-		}
+		reason := d.staleReason(ctx, r.owner, r.repo, r.event, r.id)
 		if reason == "" {
 			continue
 		}
@@ -342,9 +313,9 @@ func (d *Daemon) handlers() hookapi.Handlers {
 func (d *Daemon) status(ctx context.Context) StatusReport {
 	rep := StatusReport{Instance: d.cfg.Instance, Prefix: d.cfg.Prefix, HostID: d.hostID, Scheduler: d.sched.Snapshot()}
 	d.mu.Lock()
-	rs := make([]*runnerRec, 0, len(d.runners))
+	rs := make([]runnerRec, 0, len(d.runners))
 	for _, r := range d.runners {
-		rs = append(rs, r)
+		rs = append(rs, *r)
 	}
 	d.mu.Unlock()
 	for _, rr := range rs {
@@ -360,4 +331,55 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 		rep.VMsUp = d.win.VMsUp()
 	}
 	return rep
+}
+
+// staleReason says why a run is stale ("" = not stale or unknown).
+func (d *Daemon) staleReason(ctx context.Context, owner, repo, event string, id int64) string {
+	switch event {
+	case "pull_request", "pull_request_target":
+		if !d.cfg.Stale.CancelClosedPRs {
+			return ""
+		}
+		info, err := d.rest.GetRun(ctx, owner, repo, id)
+		if err != nil {
+			return ""
+		}
+		prs, err := d.rest.PRsForCommit(ctx, owner, repo, info.HeadSHA, info.HeadBranch)
+		if err != nil {
+			return ""
+		}
+		reason := ""
+		for _, pr := range prs {
+			if !pr.Closed {
+				continue
+			}
+			// Runs created after the close are deliberate (types: [closed]).
+			if !pr.ClosedAt.IsZero() && info.CreatedAt.After(pr.ClosedAt) {
+				continue
+			}
+			reason = "pr_closed"
+			if pr.Merged {
+				reason = "pr_merged"
+			}
+		}
+		return reason
+	case "push":
+		if !d.cfg.Stale.CancelDeletedBranch {
+			return ""
+		}
+		info, err := d.rest.GetRun(ctx, owner, repo, id)
+		if err != nil || info.HeadBranch == "" {
+			return ""
+		}
+		exists, err := d.rest.BranchExists(ctx, owner, repo, info.HeadBranch)
+		if err != nil || exists {
+			return ""
+		}
+		// A tag push has a tag, not a branch, as its head ref.
+		if tag, err := d.rest.TagExists(ctx, owner, repo, info.HeadBranch); err != nil || tag {
+			return ""
+		}
+		return "branch_deleted"
+	}
+	return ""
 }

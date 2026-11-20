@@ -100,6 +100,9 @@ type Linux struct {
 	RunnerUID    int    `toml:"runner_uid"`
 	TmpfsSize    Size   `toml:"tmpfs_size"`
 	OOMScoreAdj  int    `toml:"oom_score_adj"`
+	// AllowedBinds are host paths (absolute, not "/") jobs may bind-mount
+	// beyond the runner dir and the cache paths.
+	AllowedBinds []string `toml:"allowed_binds"`
 }
 
 type Windows struct {
@@ -382,6 +385,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Instance != "" && !regexpSafe(c.Instance) {
 		add("instance %q: use lowercase letters, digits and hyphens", c.Instance)
+	}
+	for _, p := range c.Linux.AllowedBinds {
+		if !strings.HasPrefix(p, "/") || path.Clean(p) == "/" {
+			add("linux.allowed_binds %q: use an absolute path other than /", p)
+		}
 	}
 	if c.Limits.Lanes < 0 || c.Limits.MaxParked < 0 {
 		add("limits.lanes and limits.max_parked must not be negative")

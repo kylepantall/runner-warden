@@ -21,20 +21,21 @@ import (
 )
 
 type fakeAPI struct {
-	mu        sync.Mutex
-	created   []*container.Config
-	hostCfgs  []*container.HostConfig
-	names     []string
-	started   []string
-	removed   []string
-	stopped   []string
-	nets      []network.Summary
-	vols      []volume.Volume
-	netRemove []string
-	volRemove []string
-	conts     []container.Summary // returned by every ContainerList
-	running   bool
-	lastList  []container.ListOptions
+	inspectBinds []string
+	mu           sync.Mutex
+	created      []*container.Config
+	hostCfgs     []*container.HostConfig
+	names        []string
+	started      []string
+	removed      []string
+	stopped      []string
+	nets         []network.Summary
+	vols         []volume.Volume
+	netRemove    []string
+	volRemove    []string
+	conts        []container.Summary // returned by every ContainerList
+	running      bool
+	lastList     []container.ListOptions
 }
 
 func (f *fakeAPI) ContainerCreate(_ context.Context, c *container.Config, hc *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
@@ -50,7 +51,9 @@ func (f *fakeAPI) ContainerStart(_ context.Context, id string, _ container.Start
 	return nil
 }
 func (f *fakeAPI) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
-	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: f.running}}}, nil
+	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{
+		State: &container.State{Running: f.running}, HostConfig: &container.HostConfig{Binds: f.inspectBinds},
+	}}, nil
 }
 func (f *fakeAPI) ContainerList(_ context.Context, o container.ListOptions) ([]container.Summary, error) {
 	f.mu.Lock()
@@ -170,7 +173,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 		env[k] = v
 	}
 	checks := map[string]string{
-		"ACTIONS_RUNNER_INPUT_JITCONFIG":    "JIT",
+		"DOCKER_HOST":                       "unix://" + sock,
 		"ACTIONS_RUNNER_HOOK_JOB_STARTED":   filepath.Join(dir, hookDir, "job-started.sh"),
 		"ACTIONS_RUNNER_HOOK_JOB_COMPLETED": filepath.Join(dir, hookDir, "job-completed.sh"),
 		"RUNNER_WARDEN_SOCKET":              filepath.Join(b.cfg.HookDir, testRunner, "hook.sock"),
@@ -183,12 +186,17 @@ func TestBuildRunnerContainer(t *testing.T) {
 			t.Errorf("env %s=%q want %q", k, env[k], v)
 		}
 	}
+	for _, e := range cfg.Env {
+		if strings.Contains(e, "JIT") && strings.HasPrefix(e, "ACTIONS_RUNNER_INPUT_JITCONFIG") {
+			t.Error("JIT config must not be in the container env")
+		}
+	}
 	binds := map[string]bool{}
 	for _, s := range hc.Binds {
 		binds[s] = true
 	}
 	for _, want := range []string{
-		sock + ":/var/run/docker.sock", dir + ":" + dir,
+		dir + ":" + dir,
 		"/usr/bin/rw:/usr/bin/rw:ro", b.hookDir(testRunner) + ":" + b.hookDir(testRunner),
 		"/data:/data:ro", "/cache/go:/go/pkg",
 	} {
@@ -242,6 +250,10 @@ func TestStartAndCleanup(t *testing.T) {
 	}
 	if h.BackendID != "cid"+spec.Name || len(api.started) != 1 || api.names[0] != spec.Name {
 		t.Fatalf("handle %+v started %v", h, api.started)
+	}
+	jit, err := os.ReadFile(filepath.Join(b.runnerDir(spec.Name), ".jit"))
+	if err != nil || string(jit) != "J" {
+		t.Errorf("jit file: %v", err)
 	}
 	for _, f := range []string{"job-started.sh", "job-completed.sh"} {
 		st, err := os.Stat(filepath.Join(b.runnerDir(spec.Name), hookDir, f))
@@ -339,5 +351,41 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 	g.Resume() // must resume the proxy created while paused
 	if b.paused != 0 || g.InFlight() != 0 {
 		t.Fatal("gate state")
+	}
+}
+
+func TestAdoptRestartsProxyOnSameSocket(t *testing.T) {
+	api := &fakeAPI{inspectBinds: []string{"/data:/data:ro", "/usr/bin/rw:/usr/bin/rw:ro"}}
+	b := testBackend(t, api)
+	if err := os.MkdirAll(b.runnerDir(testRunner), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Adopt(context.Background(), core.Handle{RunnerName: testRunner, BackendID: "cid"}); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Cleanup(context.Background(), testRunner)
+	if _, err := os.Stat(b.proxySock(testRunner)); err != nil {
+		t.Fatalf("proxy socket: %v", err)
+	}
+	b.mu.Lock()
+	p := b.proxies[testRunner]
+	b.mu.Unlock()
+	if p == nil || p.Socket() != b.proxySock(testRunner) {
+		t.Fatal("proxy not registered on the runner's socket")
+	}
+	allowed := b.allowedFromBinds(testRunner, api.inspectBinds)
+	has := func(x string) bool {
+		for _, a := range allowed {
+			if a == x {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("/data") || !has(b.runnerDir(testRunner)) || has("/usr/bin/rw") {
+		t.Fatalf("%v", allowed)
+	}
+	if err := b.Adopt(context.Background(), core.Handle{RunnerName: "../x"}); err == nil {
+		t.Fatal("invalid name adopted")
 	}
 }

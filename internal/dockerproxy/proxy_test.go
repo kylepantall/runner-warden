@@ -105,7 +105,7 @@ func echoUpstream(c *captured) http.Handler {
 
 func TestContainerCreateRewrite(t *testing.T) {
 	c := &captured{}
-	p := newProxy(t, startUpstream(t, echoUpstream(c)), nil)
+	p := newProxy(t, startUpstream(t, echoUpstream(c)), func(c *Config) { c.AllowedBinds = []string{"/w"} })
 	body := `{"Image":"alpine","Labels":{"a":"b"},"Env":["FOO=1"],"HostConfig":{"Binds":["/var/run/docker.sock:/var/run/docker.sock","/run/docker.sock:/other.sock:ro","/w:/w"],"Memory":0}}`
 	resp := post(t, p, "/v1.47/containers/create?name=x", body)
 	if resp.StatusCode != http.StatusCreated {
@@ -231,6 +231,10 @@ func TestPassThroughUntouched(t *testing.T) {
 
 func TestHijackUpgrade(t *testing.T) {
 	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			inspectJSON(w, ownLabels("r1"))
+			return
+		}
 		hj := w.(http.Hijacker)
 		conn, buf, err := hj.Hijack()
 		if err != nil {
@@ -407,5 +411,148 @@ func TestBuildLabelsCannotSetOurKeys(t *testing.T) {
 	}
 	if resp := post(t, p, "/build?labels=notjson", "tar"); resp.StatusCode != http.StatusBadRequest {
 		t.Fatal(resp.StatusCode)
+	}
+}
+
+func ownLabels(runner string) map[string]string {
+	return map[string]string{
+		naming.MetaManaged: "1", naming.MetaInstance: "inst", naming.MetaHostID: "h1",
+		naming.MetaRunner: runner, naming.MetaRole: "job",
+	}
+}
+
+func inspectJSON(w http.ResponseWriter, labels map[string]string) {
+	_ = json.NewEncoder(w).Encode(map[string]any{"Labels": labels, "Config": map[string]any{"Labels": labels}})
+}
+
+// isolationUpstream knows two containers (ours and another runner's) and
+// records every non-inspect request that reaches it.
+func isolationUpstream(reached chan<- string, queries chan<- url.Values) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/mine/json":
+			inspectJSON(w, ownLabels("r1"))
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/theirs/json":
+			inspectJSON(w, ownLabels("r2"))
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/runner/json":
+			l := ownLabels("r1")
+			l[naming.MetaRole] = "runner"
+			inspectJSON(w, l)
+		case r.Method == http.MethodGet && r.URL.Path == "/exec/x1/json":
+			_, _ = w.Write([]byte(`{"ContainerID":"theirs"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/ghost/json":
+			http.NotFound(w, r)
+		default:
+			reached <- r.Method + " " + r.URL.Path
+			queries <- r.URL.Query()
+		}
+	})
+}
+
+func do(t *testing.T, p *Proxy, method, path string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(method, "http://docker"+path, nil)
+	resp, err := client(p).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+func TestContainerIsolation(t *testing.T) {
+	reached, queries := make(chan string, 16), make(chan url.Values, 16)
+	p := newProxy(t, startUpstream(t, isolationUpstream(reached, queries)), nil)
+	deny := []struct{ method, path string }{
+		{"DELETE", "/containers/theirs?force=1"},
+		{"POST", "/v1.45/containers/theirs/kill"},
+		{"GET", "/containers/theirs/json"},
+		{"GET", "/containers/theirs/logs"},
+		{"POST", "/containers/runner/stop"}, // the runner's own container is off limits too
+		{"POST", "/exec/x1/start"},
+		{"POST", "/commit?container=theirs"},
+	}
+	for _, c := range deny {
+		if got := do(t, p, c.method, c.path).StatusCode; got != http.StatusForbidden {
+			t.Errorf("%s %s: status %d", c.method, c.path, got)
+		}
+	}
+	if len(reached) != 0 {
+		t.Fatal("denied request reached the daemon")
+	}
+	for _, c := range []struct{ method, path string }{
+		{"DELETE", "/containers/mine?force=1"},
+		{"POST", "/containers/mine/start"},
+		{"GET", "/containers/ghost/json"},
+	} {
+		if got := do(t, p, c.method, c.path).StatusCode; got == http.StatusForbidden {
+			t.Errorf("%s %s denied", c.method, c.path)
+		}
+	}
+}
+
+func TestListAndPruneAreScopedToRunner(t *testing.T) {
+	reached, queries := make(chan string, 16), make(chan url.Values, 16)
+	p := newProxy(t, startUpstream(t, isolationUpstream(reached, queries)), nil)
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/containers/json?all=1&filters=" + url.QueryEscape(`{"status":["running"]}`)},
+		{"GET", "/volumes"},
+		{"GET", "/networks?filters=" + url.QueryEscape(`{"label":{"x=y":true}}`)},
+		{"POST", "/volumes/prune"},
+		{"POST", "/containers/prune"},
+	} {
+		do(t, p, c.method, c.path)
+		<-reached
+		var f map[string][]string
+		if err := json.Unmarshal([]byte((<-queries).Get("filters")), &f); err != nil {
+			t.Fatal(err)
+		}
+		have := map[string]bool{}
+		for _, l := range f["label"] {
+			have[l] = true
+		}
+		for k, v := range p.Labels() {
+			if !have[k+"="+v] {
+				t.Errorf("%s %s: filter lacks %s", c.method, c.path, k)
+			}
+		}
+	}
+	if resp := do(t, p, "GET", "/containers/json?filters=notjson"); resp.StatusCode != http.StatusBadRequest {
+		t.Fatal(resp.StatusCode)
+	}
+}
+
+func TestBindAllowlist(t *testing.T) {
+	reached, queries := make(chan string, 4), make(chan url.Values, 4)
+	p := newProxy(t, startUpstream(t, isolationUpstream(reached, queries)), func(c *Config) {
+		c.AllowedBinds = []string{"/srv/runners/r1", "/cache"}
+	})
+	bad := []string{
+		`{"HostConfig":{"Binds":["/:/host"]}}`,
+		`{"HostConfig":{"Binds":["/etc:/e:ro"]}}`,
+		`{"HostConfig":{"Binds":["/srv/runners/r1/../r2:/x"]}}`,
+		`{"HostConfig":{"Binds":["/srv/runners/r10:/x"]}}`,
+		`{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/root","Target":"/r"}]}}`,
+		`{"HostConfig":{"VolumesFrom":["theirs"]}}`,
+		`{"HostConfig":{"NetworkMode":"container:theirs"}}`,
+	}
+	for _, b := range bad {
+		if got := post(t, p, "/containers/create", b).StatusCode; got != http.StatusForbidden {
+			t.Errorf("%s: status %d", b, got)
+		}
+	}
+	good := []string{
+		`{"HostConfig":{"Binds":["/srv/runners/r1/_work:/w","/cache/go:/go","namedvol:/v","/var/run/docker.sock:/var/run/docker.sock"]}}`,
+		`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"/anything","Target":"/r"}],"VolumesFrom":["mine:ro"]}}`,
+	}
+	for _, b := range good {
+		if got := post(t, p, "/containers/create", b).StatusCode; got == http.StatusForbidden {
+			t.Errorf("%s denied", b)
+		}
+		<-reached
+		<-queries
+	}
+	if len(reached) != 0 {
+		t.Fatal("denied create reached the daemon")
 	}
 }

@@ -309,6 +309,30 @@ func (p *Pool) Pick(target core.Target) (string, bool) {
 	return cold, true
 }
 
+// Peek is Pick without claiming: the VM Pick would choose for target, its
+// memory, and whether it is up (and, being unclaimed and unbound, idle). It
+// never blocks. vm is "" when no VM serves the target.
+func (p *Pool) Peek(target core.Target) (vm string, mem int64, up bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cold := ""
+	for _, name := range p.order {
+		if !p.vms[name].Serves(target) || p.busyLocked(name) {
+			continue
+		}
+		if p.up[name] {
+			return name, int64(p.vms[name].Mem), true
+		}
+		if cold == "" {
+			cold = name
+		}
+	}
+	if cold == "" {
+		return "", 0, false
+	}
+	return cold, int64(p.vms[cold].Mem), false
+}
+
 // Release drops a claim made by Pick that will not reach Start.
 func (p *Pool) Release(vm string) {
 	p.mu.Lock()

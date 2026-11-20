@@ -66,6 +66,8 @@ func TestValidateRejects(t *testing.T) {
 		"windows no licence": `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[windows]\nenabled=true\n",
 		"bad target":         `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[target]]\norg=\"a\"\nrepo=\"a/b\"\n",
 		"bad cost":           `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[cost]]\nmatch=\"a/b\"\nmem=\"1GiB\"\n",
+		"root bind":          `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"/\"]\n",
+		"relative bind":      `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"data\"]\n",
 		"unknown key":        `prefix="my-ci"` + "\nbogus=1\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n",
 	}
 	for name, s := range cases {
