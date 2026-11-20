@@ -230,9 +230,12 @@ func (d *Daemon) staleCheck(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			for _, n := range info.PRs {
-				pr, err := d.rest.GetPRState(ctx, r.owner, r.repo, n)
-				if err != nil || !pr.Closed {
+			prs, err := d.rest.PRsForCommit(ctx, r.owner, r.repo, info.HeadSHA, info.HeadBranch)
+			if err != nil {
+				continue
+			}
+			for _, pr := range prs {
+				if !pr.Closed {
 					continue
 				}
 				// Runs created after the close are deliberate (types: [closed]).

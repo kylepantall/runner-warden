@@ -270,6 +270,24 @@ func (r *REST) GetPRState(ctx context.Context, owner, repo string, number int) (
 	return PRState{Number: number, Merged: p.GetMerged(), Closed: p.GetState() == "closed", ClosedAt: p.GetClosedAt().Time}, nil
 }
 
+// PRsForCommit lists PRs (open, closed or merged) whose head is sha and whose
+// head branch is branch. A run's own pull_requests list is emptied once its
+// PR merges, so stale-run checks use this instead.
+func (r *REST) PRsForCommit(ctx context.Context, owner, repo, sha, branch string) ([]PRState, error) {
+	prs, resp, err := r.c.PullRequests.ListPullRequestsWithCommit(ctx, owner, repo, sha, &github.ListOptions{PerPage: 100})
+	if err != nil {
+		return nil, wrap("list pull requests for commit", resp, err)
+	}
+	var out []PRState
+	for _, p := range prs {
+		if branch != "" && p.GetHead().GetRef() != branch {
+			continue
+		}
+		out = append(out, PRState{Number: p.GetNumber(), Merged: !p.GetMergedAt().IsZero(), Closed: p.GetState() == "closed", ClosedAt: p.GetClosedAt().Time})
+	}
+	return out, nil
+}
+
 // BranchExists reports whether a branch exists.
 func (r *REST) BranchExists(ctx context.Context, owner, repo, branch string) (bool, error) {
 	_, resp, err := r.c.Repositories.GetBranch(ctx, owner, repo, branch, 0)
