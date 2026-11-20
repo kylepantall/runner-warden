@@ -111,6 +111,7 @@ type Windows struct {
 	RunnerDir     string      `toml:"runner_dir"` // inside the guest
 	WorkDir       string      `toml:"work_dir"`   // inside the guest, wiped per job
 	RunnerVersion string      `toml:"runner_version"`
+	TaskLogon     string      `toml:"task_logon"` // Interactive (default) or S4U
 	IdleTTL       Duration    `toml:"idle_ttl"`
 	VMs           []WindowsVM `toml:"vm"`
 }

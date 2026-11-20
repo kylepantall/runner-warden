@@ -15,8 +15,10 @@ type WindowsPool interface {
 	core.Backend
 	scheduler.VMProbe
 	Pick(t core.Target) (vm string, ok bool)
+	Release(vm string)
 	EnsureUp(ctx context.Context, vm string) error
-	StopIdle(ctx context.Context, now time.Time)
+	WorkFolder(vm, runner string) string
+	StopIdle(ctx context.Context, now time.Time) []string
 }
 
 const monitorEvery = 15 * time.Second
@@ -273,7 +275,9 @@ func (d *Daemon) windowsIdleLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case now := <-t.C:
-			d.win.StopIdle(ctx, now)
+			for _, vm := range d.win.StopIdle(ctx, now) {
+				d.log.Info("windows vm stopped after idle", "vm", vm)
+			}
 		}
 	}
 }

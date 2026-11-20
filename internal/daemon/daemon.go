@@ -102,6 +102,7 @@ func New(o Options) (*Daemon, error) {
 		st.Close()
 		return nil, fmt.Errorf("config prefix %q differs from the recorded prefix %q; use `runner-warden prefix set`", c.Prefix, meta.Prefix)
 	}
+	_ = os.WriteFile(HostIDFile(c.StateDir), []byte(meta.HostID), 0o644)
 	rest, err := gh.NewREST(o.Token)
 	if err != nil {
 		st.Close()
@@ -222,6 +223,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return nil
 }
 
+// HostIDFile records the host id for CLI commands that run beside the daemon.
+func HostIDFile(stateDir string) string { return filepath.Join(stateDir, "host-id") }
+
 // HookDir is the directory holding hook.sock, mounted into runners.
 func HookDir(instance string) string { return filepath.Join(config.RunDir, instance, "hook") }
 
@@ -315,12 +319,20 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 			return "", errors.New("no idle windows vm serves this target")
 		}
 		if err := d.win.EnsureUp(ctx, vm); err != nil {
+			d.win.Release(vm)
 			return "", fmt.Errorf("windows vm %s: %w", vm, err)
 		}
 		spec.Env[WindowsVMEnv] = vm
 	}
-	jit, ghID, err := d.sets[l.Lane-1].GenerateJIT(ctx, l.ScaleSetKey, name)
+	var workFolder []string
+	if vm != "" {
+		workFolder = []string{d.win.WorkFolder(vm, name)}
+	}
+	jit, ghID, err := d.sets[l.Lane-1].GenerateJIT(ctx, l.ScaleSetKey, name, workFolder...)
 	if err != nil {
+		if vm != "" {
+			d.win.Release(vm)
+		}
 		return "", fmt.Errorf("jit config: %w", err)
 	}
 	spec.JITConfig = jit
@@ -337,6 +349,9 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		_ = d.sets[l.Lane-1].RemoveRunner(context.WithoutCancel(ctx), l.ScaleSetKey, ghID)
 		_ = b.Cleanup(context.WithoutCancel(ctx), name)
 		_, _ = d.store.DeleteRunner(name)
+		if vm != "" {
+			d.win.Release(vm)
+		}
 		return "", fmt.Errorf("start runner: %w", err)
 	}
 	rec.BackendID, rec.State = h.BackendID, "idle"

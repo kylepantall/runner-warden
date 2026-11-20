@@ -219,8 +219,9 @@ func (s *ScaleSets) DeleteByID(ctx context.Context, t core.Target, id int) error
 }
 
 // GenerateJIT registers an ephemeral runner named runnerName and returns the
-// encoded JIT config and the runner id.
-func (s *ScaleSets) GenerateJIT(ctx context.Context, key core.ScaleSetKey, runnerName string) (string, int, error) {
+// encoded JIT config and the runner id. workFolder is optional (Windows VMs
+// pass an absolute per-job folder); empty keeps the runner default `_work`.
+func (s *ScaleSets) GenerateJIT(ctx context.Context, key core.ScaleSetKey, runnerName string, workFolder ...string) (string, int, error) {
 	id, err := s.mustID(key)
 	if err != nil {
 		return "", 0, err
@@ -229,7 +230,11 @@ func (s *ScaleSets) GenerateJIT(ctx context.Context, key core.ScaleSetKey, runne
 	if err != nil {
 		return "", 0, err
 	}
-	cfg, err := c.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: runnerName}, id)
+	setting := &scaleset.RunnerScaleSetJitRunnerSetting{Name: runnerName}
+	if len(workFolder) > 0 {
+		setting.WorkFolder = workFolder[0]
+	}
+	cfg, err := c.GenerateJitRunnerConfig(ctx, setting, id)
 	if err != nil {
 		return "", 0, fmt.Errorf("generate jit config: %w", err)
 	}
