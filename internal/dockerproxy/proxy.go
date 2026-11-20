@@ -36,6 +36,10 @@ var hostSockets = []string{"/var/run/docker.sock", "/run/docker.sock"}
 var (
 	createPath = regexp.MustCompile(`^(/v[0-9.]+)?/(containers|networks|volumes)/create$`)
 	pullPath   = regexp.MustCompile(`^(/v[0-9.]+)?/images/create$`)
+	buildPath  = regexp.MustCompile(`^(/v[0-9.]+)?/build$`)
+	// Cluster-level endpoints a job has no business with: swarm services and
+	// secrets could mint resources outside the labelled, slice-capped path.
+	deniedPath = regexp.MustCompile(`^(/v[0-9.]+)?/(swarm|services|tasks|plugins|secrets|configs|nodes)(/|$)`)
 )
 
 // Config configures one proxy.
@@ -123,6 +127,17 @@ func (p *Proxy) Close() error {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if deniedPath.MatchString(r.URL.Path) {
+		p.log.Warn("proxy denied endpoint", "runner", p.cfg.Runner)
+		http.Error(w, "endpoint not allowed", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost && buildPath.MatchString(r.URL.Path) {
+		if err := p.rewriteBuild(r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	if r.Method == http.MethodPost {
 		if m := createPath.FindStringSubmatch(r.URL.Path); m != nil {
 			if status, err := p.rewrite(w, r, m[2]); err != nil {
@@ -240,6 +255,35 @@ func (p *Proxy) rewrite(w http.ResponseWriter, r *http.Request, kind string) (in
 	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	r.TransferEncoding = nil
 	return 0, nil
+}
+
+// rewriteBuild makes built images attributable and keeps a job from setting
+// labels under our metadata namespace: client-supplied keys there are dropped
+// and the proxy's own labels (role=job) are stamped on.
+func (p *Proxy) rewriteBuild(r *http.Request) error {
+	q := r.URL.Query()
+	labels := map[string]string{}
+	for _, raw := range q["labels"] {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			return errors.New("malformed labels parameter")
+		}
+		for k, v := range m {
+			if !strings.HasPrefix(strings.ToLower(k), naming.MetaPrefix) {
+				labels[k] = v
+			}
+		}
+	}
+	for k, v := range p.Labels() {
+		labels[k] = v
+	}
+	out, err := json.Marshal(labels)
+	if err != nil {
+		return err
+	}
+	q.Set("labels", string(out))
+	r.URL.RawQuery = q.Encode()
+	return nil
 }
 
 // Labels returns the ownership labels the proxy stamps (role=job).

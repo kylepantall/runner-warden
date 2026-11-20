@@ -91,14 +91,14 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	env["ACTIONS_RUNNER_INPUT_JITCONFIG"] = spec.JITConfig
 	env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = started
 	env["ACTIONS_RUNNER_HOOK_JOB_COMPLETED"] = completed
-	env["RUNNER_WARDEN_SOCKET"] = filepath.Join(c.HookDir, "hook.sock")
+	env["RUNNER_WARDEN_SOCKET"] = filepath.Join(b.hookDir(spec.Name), "hook.sock")
 	env["RUNNER_WARDEN_RUNNER"] = spec.Name
 
 	binds := []string{
 		bind(sock, "/var/run/docker.sock", false),
 		bind(dir, dir, false),
 		bind(c.HookBinary, c.HookBinary, true),
-		bind(c.HookDir, c.HookDir, false),
+		bind(b.hookDir(spec.Name), b.hookDir(spec.Name), false),
 	}
 	for _, m := range spec.Mounts {
 		binds = append(binds, bind(m.HostPath, m.ContainerPath, m.ReadOnly))
@@ -181,6 +181,14 @@ func (b *Backend) runnerOwner() int {
 func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, error) {
 	if spec.Name == "" || spec.JITConfig == "" {
 		return core.Handle{}, errors.New("runner spec needs a name and JIT config")
+	}
+	if !b.validName(spec.Name) {
+		return core.Handle{}, errors.New("invalid runner name")
+	}
+	// The daemon creates the runner's private hook dir first; a missing one
+	// would be created by Docker as a root-owned 0755 dir.
+	if _, err := os.Stat(b.hookDir(spec.Name)); err != nil {
+		return core.Handle{}, fmt.Errorf("runner hook dir: %w", err)
 	}
 	dir, sock := b.runnerDir(spec.Name), b.proxySock(spec.Name)
 	if err := b.prepareDir(dir); err != nil {

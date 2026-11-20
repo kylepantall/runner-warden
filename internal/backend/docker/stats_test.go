@@ -59,13 +59,13 @@ func TestStatsSumsContainersAndStaysMonotonic(t *testing.T) {
 	writeCg(t, filepath.Join(slice, "docker-job1.scope"), 3_000_000, 400, 500, 300, 1, "8:0 rbytes=5 wbytes=5\n")
 	api.conts = []container.Summary{{ID: "job1"}}
 
-	diag := filepath.Join(b.runnerDir("r"), "_diag")
+	diag := filepath.Join(b.runnerDir(testRunner), "_diag")
 	_ = os.MkdirAll(filepath.Join(diag, "pages"), 0o755)
 	_ = os.WriteFile(filepath.Join(diag, "pages", "step_1.log"), make([]byte, 1234), 0o644)
 	// Keep-alive noise in the runner's own logs must not count as job output.
 	_ = os.WriteFile(filepath.Join(diag, "Worker_1.log"), make([]byte, 999), 0o644)
 
-	h := core.Handle{RunnerName: "r", BackendID: "run1"}
+	h := core.Handle{RunnerName: testRunner, BackendID: "run1"}
 	u, err := b.Stats(context.Background(), h)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestStatsSumsContainersAndStaysMonotonic(t *testing.T) {
 
 func TestStatsDeadRunner(t *testing.T) {
 	b := testBackend(t, &fakeAPI{running: false})
-	u, err := b.Stats(context.Background(), core.Handle{RunnerName: "r", BackendID: "gone"})
+	u, err := b.Stats(context.Background(), core.Handle{RunnerName: testRunner, BackendID: "gone"})
 	if err != nil || u.Alive {
 		t.Fatalf("%+v %v", u, err)
 	}

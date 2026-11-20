@@ -38,6 +38,7 @@ type Daemon struct {
 	backends map[core.OS]core.Backend
 	win      WindowsPool // nil unless windows is enabled
 	sched    *scheduler.Scheduler
+	hooks    *hookapi.RunnerHooks // per-runner hook sockets (Linux runners)
 	lanes    []scheduler.LaneKey
 	loops    map[string]func(context.Context) error
 
@@ -153,6 +154,11 @@ func New(o Options) (*Daemon, error) {
 		o.Log.Warn("cpu topology unavailable; pinning disabled", "error", err.Error())
 	}
 	d.sched = scheduler.New(so)
+	uid := c.Linux.RunnerUID
+	if uid <= 0 {
+		uid = 1001
+	}
+	d.hooks = hookapi.NewRunnerHooks(HookDir(c.Instance), uid, d.handlers(), 0)
 	return d, nil
 }
 
@@ -179,10 +185,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("control socket: %w", err)
 	}
-	hookLn, _, err := hookapi.ListenHook(HookDir(d.cfg.Instance))
-	if err != nil {
-		return fmt.Errorf("hook socket: %w", err)
-	}
 	h := d.handlers()
 
 	var wg sync.WaitGroup
@@ -196,7 +198,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 	run("control", func(ctx context.Context) error { return hookapi.Serve(ctx, hookapi.NewControlServer(h), ctrl) })
-	run("hook", func(ctx context.Context) error { return hookapi.Serve(ctx, hookapi.NewHookServer(h), hookLn) })
 	run("scheduler", d.sched.Run)
 	d.mu.Lock()
 	for _, l := range d.lanes {
@@ -217,6 +218,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	d.sched.Drain(true)
+	d.hooks.Close()
 	wg.Wait()
 	d.sched.Wait()
 	d.log.Info("daemon stopped")
@@ -226,8 +228,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 // HostIDFile records the host id for CLI commands that run beside the daemon.
 func HostIDFile(stateDir string) string { return filepath.Join(stateDir, "host-id") }
 
-// HookDir is the directory holding hook.sock, mounted into runners.
+// HookDir is the base of the per-runner hook dirs (<HookDir>/<runner>/hook.sock);
+// only a runner's own dir is mounted into it.
 func HookDir(instance string) string { return filepath.Join(config.RunDir, instance, "hook") }
+
+// validRunner reports whether name is one this daemon could have generated.
+// Names read back from container labels, the store or a backend listing must
+// pass before they reach a filesystem path or a GitHub call.
+func (d *Daemon) validRunner(name string) bool {
+	return naming.ValidRunnerName(d.cfg.Prefix, d.hostID, name)
+}
+
+// startHookSocket creates the runner's private hook socket (Linux runners only).
+func (d *Daemon) startHookSocket(os core.OS, name string) error {
+	if os != core.Linux {
+		return nil
+	}
+	_, err := d.hooks.Start(name)
+	return err
+}
 
 func (d *Daemon) ensureScaleSets(ctx context.Context) error {
 	for _, l := range d.lanes {
@@ -344,8 +363,13 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	if err := d.store.UpsertRunner(rec); err != nil {
 		d.log.Warn("store runner failed", "runner", name, "error", err.Error())
 	}
-	h, err := b.Start(ctx, spec)
+	err = d.startHookSocket(l.OS, name)
+	var h core.Handle
+	if err == nil {
+		h, err = b.Start(ctx, spec)
+	}
 	if err != nil {
+		d.hooks.Stop(name)
 		_ = d.sets[l.Lane-1].RemoveRunner(context.WithoutCancel(ctx), l.ScaleSetKey, ghID)
 		_ = b.Cleanup(context.WithoutCancel(ctx), name)
 		_, _ = d.store.DeleteRunner(name)
@@ -365,6 +389,11 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 
 // StopRunner implements scheduler.Runners: stop, clean up, deregister.
 func (d *Daemon) StopRunner(ctx context.Context, name string) error {
+	if !d.validRunner(name) {
+		d.log.Warn("refusing to stop runner with an invalid name")
+		_, _ = d.store.DeleteRunner(name)
+		return errors.New("invalid runner name")
+	}
 	d.mu.Lock()
 	rr := d.runners[name]
 	delete(d.runners, name)
@@ -379,6 +408,7 @@ func (d *Daemon) StopRunner(ctx context.Context, name string) error {
 		lane = scheduler.LaneKey{ScaleSetKey: core.ScaleSetKey{Target: core.Target{Owner: r.Owner, Repo: r.Repo}, OS: os}, Lane: r.Lane}
 		ghID = r.GitHubRunnerID
 	}
+	d.hooks.Stop(name)
 	b := d.backends[os]
 	var errs []error
 	if b != nil {
@@ -439,9 +469,17 @@ func (d *Daemon) restore(ctx context.Context) {
 		d.log.Error("list stored runners failed", "error", err.Error())
 	}
 	byName := map[string]store.Runner{}
+	valid := recs[:0:0]
 	for _, r := range recs {
+		if !d.validRunner(r.Name) {
+			d.log.Warn("dropping stored runner with an invalid name")
+			_, _ = d.store.DeleteRunner(r.Name)
+			continue
+		}
 		byName[r.Name] = r
+		valid = append(valid, r)
 	}
+	recs = valid
 	live := map[string]core.Handle{}
 	for os, b := range d.backends {
 		hs, err := b.List(ctx)
@@ -450,6 +488,10 @@ func (d *Daemon) restore(ctx context.Context) {
 			continue
 		}
 		for _, h := range hs {
+			if !d.validRunner(h.RunnerName) {
+				d.log.Warn("ignoring backend runner with an invalid name", "os", string(os))
+				continue
+			}
 			if _, ok := byName[h.RunnerName]; !ok {
 				d.log.Warn("removing unrecorded runner", "runner", h.RunnerName)
 				_ = b.Stop(ctx, h, 10*time.Second)
@@ -478,6 +520,9 @@ func (d *Daemon) restore(ctx context.Context) {
 			owner, repo, _ := strings.Cut(r.JobRepo, "/")
 			job = &core.Job{RunID: r.JobRunID, Name: r.JobName, Owner: owner, Repo: repo, RunnerName: r.Name, ScaleSet: lane.ScaleSetKey}
 			rr.jobAt, rr.runID, rr.owner, rr.repo = time.Now(), r.JobRunID, owner, repo
+		}
+		if err := d.startHookSocket(lane.OS, r.Name); err != nil {
+			d.log.Error("hook socket for adopted runner failed", "runner", r.Name, "error", err.Error())
 		}
 		d.mu.Lock()
 		d.runners[r.Name] = rr

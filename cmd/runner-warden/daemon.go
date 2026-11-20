@@ -58,6 +58,7 @@ func daemonCmd() *cobra.Command {
 					if cfg.Linux.Enabled {
 						b, err := docker.New(docker.Config{
 							Instance:     cfg.Instance,
+							Prefix:       cfg.Prefix,
 							HostID:       hostID,
 							StateDir:     cfg.StateDir,
 							Image:        cfg.Linux.Image,

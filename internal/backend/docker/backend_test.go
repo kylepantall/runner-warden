@@ -107,6 +107,8 @@ func (f *fakeAPI) ImageInspect(context.Context, string, ...client.ImageInspectOp
 	return image.InspectResponse{}, nil
 }
 
+const testRunner = "my-ci-h1-0000abcd"
+
 func shortDir(t *testing.T) string {
 	t.Helper()
 	d, err := os.MkdirTemp("/tmp", "rwb")
@@ -119,11 +121,12 @@ func shortDir(t *testing.T) string {
 
 func testBackend(t *testing.T, api dockerAPI) *Backend {
 	t.Helper()
+	hookBase := shortDir(t)
 	b, err := newBackend(Config{
-		Instance: "main", HostID: "h1", StateDir: shortDir(t),
+		Instance: "main", Prefix: "my-ci", HostID: "h1", StateDir: shortDir(t),
 		Image: "runner:img", DockerSocket: filepath.Join(shortDir(t), "docker.sock"),
 		Slice: "runner-warden-main.slice", RunnerUID: 1001, TmpfsSize: 1 << 30, OOMScoreAdj: 500,
-		HookBinary: "/usr/bin/rw", HookDir: "/run/rw/hook",
+		HookBinary: "/usr/bin/rw", HookDir: hookBase,
 		CacheBinds: []string{"/cache/go:/go/pkg"}, CacheEnv: map[string]string{"GOMODCACHE": "/go/pkg"},
 	}, api)
 	if err != nil {
@@ -144,7 +147,7 @@ func TestCaps(t *testing.T) {
 func TestBuildRunnerContainer(t *testing.T) {
 	b := testBackend(t, &fakeAPI{})
 	spec := core.RunnerSpec{
-		Name: "my-ci-h1-abcd", JITConfig: "JIT", CPUSet: "2-3",
+		Name: testRunner, JITConfig: "JIT", CPUSet: "2-3",
 		Env:     map[string]string{"FOO": "bar"},
 		Mounts:  []core.Mount{{HostPath: "/data", ContainerPath: "/data", ReadOnly: true}},
 		Devices: []string{"/dev/kvm"},
@@ -170,7 +173,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 		"ACTIONS_RUNNER_INPUT_JITCONFIG":    "JIT",
 		"ACTIONS_RUNNER_HOOK_JOB_STARTED":   filepath.Join(dir, hookDir, "job-started.sh"),
 		"ACTIONS_RUNNER_HOOK_JOB_COMPLETED": filepath.Join(dir, hookDir, "job-completed.sh"),
-		"RUNNER_WARDEN_SOCKET":              "/run/rw/hook/hook.sock",
+		"RUNNER_WARDEN_SOCKET":              filepath.Join(b.cfg.HookDir, testRunner, "hook.sock"),
 		"RUNNER_WARDEN_RUNNER":              spec.Name,
 		"FOO":                               "bar",
 		"GOMODCACHE":                        "/go/pkg",
@@ -186,12 +189,15 @@ func TestBuildRunnerContainer(t *testing.T) {
 	}
 	for _, want := range []string{
 		sock + ":/var/run/docker.sock", dir + ":" + dir,
-		"/usr/bin/rw:/usr/bin/rw:ro", "/run/rw/hook:/run/rw/hook",
+		"/usr/bin/rw:/usr/bin/rw:ro", b.hookDir(testRunner) + ":" + b.hookDir(testRunner),
 		"/data:/data:ro", "/cache/go:/go/pkg",
 	} {
 		if !binds[want] {
 			t.Errorf("missing bind %s in %v", want, hc.Binds)
 		}
+	}
+	if binds[b.cfg.HookDir+":"+b.cfg.HookDir] {
+		t.Error("the shared hook base must not be mounted")
 	}
 	if hc.CgroupParent != "runner-warden-main.slice" || hc.OomScoreAdj != 500 || hc.CpusetCpus != "2-3" {
 		t.Errorf("hostconfig %+v", hc.Resources)
@@ -223,7 +229,13 @@ func TestHookWrapperQuoting(t *testing.T) {
 func TestStartAndCleanup(t *testing.T) {
 	api := &fakeAPI{}
 	b := testBackend(t, api)
-	spec := core.RunnerSpec{Name: "my-ci-h1-0001", JITConfig: "J"}
+	spec := core.RunnerSpec{Name: testRunner, JITConfig: "J"}
+	if _, err := b.Start(context.Background(), spec); err == nil {
+		t.Fatal("start without the daemon-made hook dir must fail")
+	}
+	if err := os.MkdirAll(b.hookDir(spec.Name), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	h, err := b.Start(context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
@@ -259,16 +271,39 @@ func TestStartAndCleanup(t *testing.T) {
 		t.Error("socket not removed")
 	}
 	// Cleanup of a runner that never started must not fail.
-	if err := b.Cleanup(context.Background(), "never-started"); err != nil {
+	if err := b.Cleanup(context.Background(), "my-ci-h1-0000beef"); err != nil {
 		t.Fatal(err)
 	}
 }
 
+func TestInvalidRunnerNamesRefused(t *testing.T) {
+	api := &fakeAPI{}
+	b := testBackend(t, api)
+	victim := filepath.Join(b.runnersDir(), "victim")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"", "..", "../victim", "victim", "my-ci-h1-ZZZZZZZZ"} {
+		if err := b.Cleanup(context.Background(), n); err == nil {
+			t.Errorf("cleanup accepted %q", n)
+		}
+		if _, err := b.Start(context.Background(), core.RunnerSpec{Name: n, JITConfig: "J"}); err == nil && n != "" {
+			t.Errorf("start accepted %q", n)
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatal("cleanup touched a directory for an invalid name")
+	}
+	if len(api.removed)+len(api.started) != 0 {
+		t.Fatal("docker calls made for invalid names")
+	}
+}
+
 func TestListFiltersByLabel(t *testing.T) {
-	api := &fakeAPI{conts: []container.Summary{{ID: "x", Created: 100, Labels: map[string]string{naming.MetaRunner: "r1"}}}}
+	api := &fakeAPI{conts: []container.Summary{{ID: "x", Created: 100, Labels: map[string]string{naming.MetaRunner: "my-ci-h1-0000000a"}}, {ID: "evil", Labels: map[string]string{naming.MetaRunner: "../../etc"}}}}
 	b := testBackend(t, api)
 	hs, err := b.List(context.Background())
-	if err != nil || len(hs) != 1 || hs[0].RunnerName != "r1" || hs[0].BackendID != "x" {
+	if err != nil || len(hs) != 1 || hs[0].RunnerName != "my-ci-h1-0000000a" || hs[0].BackendID != "x" {
 		t.Fatalf("%v %v", hs, err)
 	}
 	f := api.lastList[0].Filters
@@ -297,10 +332,10 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 	b := testBackend(t, &fakeAPI{})
 	g := b.PullGate()
 	g.Pause()
-	if err := b.startProxy("r1", b.proxySock("r1")); err != nil {
+	if err := b.startProxy(testRunner, b.proxySock(testRunner)); err != nil {
 		t.Fatal(err)
 	}
-	defer b.Cleanup(context.Background(), "r1")
+	defer b.Cleanup(context.Background(), testRunner)
 	g.Resume() // must resume the proxy created while paused
 	if b.paused != 0 || g.InFlight() != 0 {
 		t.Fatal("gate state")

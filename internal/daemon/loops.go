@@ -168,6 +168,9 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			continue
 		}
 		for _, h := range hs {
+			if !d.validRunner(h.RunnerName) {
+				continue
+			}
 			d.mu.Lock()
 			_, tracked := d.runners[h.RunnerName]
 			d.mu.Unlock()

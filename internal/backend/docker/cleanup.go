@@ -16,6 +16,10 @@ import (
 // Cleanup removes everything a runner and its jobs created. Idempotent and safe
 // for runners that never started. Resources are found by label only.
 func (b *Backend) Cleanup(ctx context.Context, runner string) error {
+	if !b.validName(runner) {
+		// Never build a filesystem path from a name we could not have made.
+		return errors.New("invalid runner name")
+	}
 	b.mu.Lock()
 	if p := b.proxies[runner]; p != nil {
 		_ = p.Close()

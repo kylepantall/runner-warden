@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -351,5 +352,60 @@ func TestCloseReleasesPausedPulls(t *testing.T) {
 	case <-errc:
 	case <-time.After(3 * time.Second):
 		t.Fatal("client stuck after Close")
+	}
+}
+
+func TestDeniedEndpoints(t *testing.T) {
+	hit := make(chan string, 8)
+	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit <- r.URL.Path })
+	p := newProxy(t, startUpstream(t, up), nil)
+	for _, path := range []string{
+		"/swarm/init", "/v1.45/swarm/join", "/services/create", "/v1.43/services/x/update",
+		"/plugins/pull", "/secrets/create", "/configs/create", "/nodes/n1", "/nodes",
+	} {
+		resp := post(t, p, path, "{}")
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status %d", path, resp.StatusCode)
+		}
+	}
+	if len(hit) != 0 {
+		t.Fatal("denied request reached the upstream")
+	}
+	// Similar-looking but allowed paths still pass.
+	if resp := post(t, p, "/containers/servicesx/start", "{}"); resp.StatusCode == http.StatusForbidden {
+		t.Error("over-broad deny")
+	}
+}
+
+func TestBuildLabelsCannotSetOurKeys(t *testing.T) {
+	got := make(chan url.Values, 1)
+	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.URL.Query() })
+	p := newProxy(t, startUpstream(t, up), nil)
+	forged, _ := json.Marshal(map[string]string{
+		naming.MetaRole: "runner", strings.ToUpper(naming.MetaRunner): "x", "keep": "me",
+	})
+	resp := post(t, p, "/v1.45/build?t=img&labels="+url.QueryEscape(string(forged)), "tar")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatal(resp.StatusCode)
+	}
+	q := <-got
+	var labels map[string]string
+	if err := json.Unmarshal([]byte(q.Get("labels")), &labels); err != nil {
+		t.Fatal(err)
+	}
+	if labels[naming.MetaRole] != "job" || labels[naming.MetaRunner] != "r1" || labels["keep"] != "me" || q.Get("t") != "img" {
+		t.Fatalf("%v %v", labels, q)
+	}
+	if _, ok := labels[strings.ToUpper(naming.MetaRunner)]; ok {
+		t.Fatal("forged key kept")
+	}
+	// No labels param at all still gets ours; garbage is refused.
+	resp = post(t, p, "/build", "tar")
+	q = <-got
+	if resp.StatusCode != http.StatusOK || !strings.Contains(q.Get("labels"), naming.MetaManaged) {
+		t.Fatalf("%d %v", resp.StatusCode, q)
+	}
+	if resp := post(t, p, "/build?labels=notjson", "tar"); resp.StatusCode != http.StatusBadRequest {
+		t.Fatal(resp.StatusCode)
 	}
 }

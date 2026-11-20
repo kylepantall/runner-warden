@@ -29,6 +29,7 @@ import (
 // Config configures the backend.
 type Config struct {
 	Instance string
+	Prefix   string // runner name prefix; names are validated against it
 	HostID   string
 	StateDir string // runner dirs and proxy sockets live in <StateDir>/runners
 	Image    string // default runner image
@@ -40,8 +41,10 @@ type Config struct {
 	OOMScoreAdj  int
 
 	// HookBinary is mounted read-only into every runner at the same path.
-	// HookDir is a dedicated directory holding only hook.sock; it is mounted
-	// read-write at the same path so a recreated socket stays visible.
+	// HookDir is the base of the per-runner hook dirs, <HookDir>/<runner>,
+	// each holding only that runner's hook.sock. The daemon creates the dir
+	// before Start; only that one dir is mounted (read-write, at the same
+	// path, so a recreated socket stays visible).
 	HookBinary string
 	HookDir    string
 
@@ -103,8 +106,8 @@ func New(cfg Config) (*Backend, error) {
 
 func newBackend(cfg Config, api dockerAPI) (*Backend, error) {
 	switch {
-	case cfg.Instance == "" || cfg.StateDir == "" || cfg.Image == "" || cfg.Slice == "":
-		return nil, errors.New("docker backend: instance, state dir, image and slice are required")
+	case cfg.Instance == "" || cfg.Prefix == "" || cfg.HostID == "" || cfg.StateDir == "" || cfg.Image == "" || cfg.Slice == "":
+		return nil, errors.New("docker backend: instance, prefix, host id, state dir, image and slice are required")
 	case cfg.HookBinary == "" || cfg.HookDir == "":
 		return nil, errors.New("docker backend: hook binary and hook dir are required")
 	}
@@ -123,6 +126,14 @@ func newBackend(cfg Config, api dockerAPI) (*Backend, error) {
 		cgPaths: map[string]string{},
 	}, nil
 }
+
+// validName reports whether n is a runner name this instance could have made.
+func (b *Backend) validName(n string) bool {
+	return naming.ValidRunnerName(b.cfg.Prefix, b.cfg.HostID, n)
+}
+
+// hookDir is the runner's own hook dir (mounted into it).
+func (b *Backend) hookDir(n string) string { return filepath.Join(b.cfg.HookDir, n) }
 
 func (b *Backend) runnersDir() string        { return filepath.Join(b.cfg.StateDir, "runners") }
 func (b *Backend) runnerDir(n string) string { return filepath.Join(b.runnersDir(), n) }
@@ -177,6 +188,10 @@ func (b *Backend) List(ctx context.Context) ([]core.Handle, error) {
 	}
 	out := make([]core.Handle, 0, len(cs))
 	for _, c := range cs {
+		if !b.validName(c.Labels[naming.MetaRunner]) {
+			b.log.Warn("ignoring runner container with an invalid name label", "id", c.ID)
+			continue
+		}
 		out = append(out, core.Handle{
 			RunnerName: c.Labels[naming.MetaRunner],
 			BackendID:  c.ID,

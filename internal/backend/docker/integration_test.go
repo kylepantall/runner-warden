@@ -22,7 +22,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 	hook := shortDir(t) + "/hook"
 	_ = os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o755)
 	b, err := New(Config{
-		Instance: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
+		Instance: "rwtest", Prefix: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
 		Slice: "runner-warden-rwtest.slice", RunnerUID: 1001, TmpfsSize: 64 << 20, OOMScoreAdj: 500,
 		HookBinary: hook, HookDir: shortDir(t),
 	})
@@ -34,7 +34,8 @@ func TestIntegrationLifecycle(t *testing.T) {
 	if err := b.Prepare(ctx); err != nil {
 		t.Fatal(err)
 	}
-	spec := core.RunnerSpec{Name: "rwtest-t0-0001", JITConfig: "x"}
+	spec := core.RunnerSpec{Name: "rwtest-t0-0000000a", JITConfig: "x"}
+	_ = os.MkdirAll(b.hookDir(spec.Name), 0o700)
 	t.Cleanup(func() { _ = b.Cleanup(context.Background(), spec.Name) })
 	h, err := b.Start(ctx, spec)
 	if err != nil {

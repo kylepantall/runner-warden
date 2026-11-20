@@ -1,7 +1,7 @@
 // Package hookapi is the daemon's local HTTP-over-unix-socket protocol. Two
 // servers share one set of handlers: the control server (CLI, all endpoints)
-// and the hook server (only the runner hook endpoints; its directory is
-// bind-mounted into runner containers and must never expose control calls).
+// and the hook servers (only the runner hook endpoints; one per runner, see
+// RunnerHooks, each directory bind-mounted into that runner alone).
 package hookapi
 
 import (
@@ -29,11 +29,15 @@ const (
 	PathKillFmt      = "/v1/runners/%s/kill"
 )
 
-// HookSocketName is the socket file inside the hook directory.
+// HookSocketName is the socket file inside a runner's hook directory.
 const HookSocketName = "hook.sock"
 
 // ErrNotFound lets a Kill handler report an unknown runner (HTTP 404).
 var ErrNotFound = errors.New("hookapi: not found")
+
+// ErrConflict lets a handler refuse a request that clashes with one already in
+// flight (HTTP 409).
+var ErrConflict = errors.New("hookapi: conflict")
 
 // Handlers are implemented by the daemon; nil funcs answer 501.
 type Handlers struct {
@@ -136,6 +140,10 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func reply(w http.ResponseWriter, v any, err error) {
+	if errors.Is(err, ErrConflict) {
+		http.Error(w, "conflict", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -174,18 +182,6 @@ func ListenControl(path, group string) (net.Listener, error) {
 		return nil, err
 	}
 	return listenUnix(path, mode, group)
-}
-
-// ListenHook creates dir (0755, ours alone) and opens <dir>/hook.sock with
-// mode 0666 so any uid inside a runner container can reach it. It returns the
-// socket path as well.
-func ListenHook(dir string) (net.Listener, string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, "", err
-	}
-	p := filepath.Join(dir, HookSocketName)
-	ln, err := listenUnix(p, 0o666, "")
-	return ln, p, err
 }
 
 func listenUnix(path string, mode os.FileMode, group string) (net.Listener, error) {

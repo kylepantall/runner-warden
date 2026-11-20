@@ -36,3 +36,23 @@ func TestDerivedNamesFitGitHubLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestValidRunnerName(t *testing.T) {
+	name := RunnerName("my-ci", "ab12cd34")
+	if !ValidRunnerName("my-ci", "ab12cd34", name) {
+		t.Fatalf("generated name rejected")
+	}
+	bad := []string{
+		"", "..", "../etc", name + "x", name[:len(name)-1], "other-ab12cd34-0123abcd",
+		"my-ci-ab12cd34-0123ABCD", "my-ci-ab12cd34-0123abc/", "my-ci-ab12cd34-../../x1",
+		"my-ci-ab12cd34-0123abcg", "/my-ci-ab12cd34-0123abcd",
+	}
+	for _, n := range bad {
+		if ValidRunnerName("my-ci", "ab12cd34", n) {
+			t.Errorf("%q accepted", n)
+		}
+	}
+	if ValidRunnerName("", "", "--00000000") {
+		t.Error("empty prefix/host accepted")
+	}
+}

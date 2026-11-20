@@ -68,6 +68,23 @@ func RunnerName(prefix, hostID string) string {
 	return prefix + "-" + hostID + "-" + hex.EncodeToString(b)
 }
 
+// ValidRunnerName reports whether name is exactly what RunnerName(prefix,
+// hostID) can produce: <prefix>-<hostid>-<8 lowercase hex>. Names that came
+// from a container label, the store or a backend listing must pass this before
+// they reach a filesystem path or an API call.
+func ValidRunnerName(prefix, hostID, name string) bool {
+	head := prefix + "-" + hostID + "-"
+	if prefix == "" || hostID == "" || len(name) != len(head)+randLen || !strings.HasPrefix(name, head) {
+		return false
+	}
+	for _, c := range name[len(head):] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // NewHostID returns a random host id for a fresh install.
 func NewHostID() string {
 	b := make([]byte, hostIDLen/2)
