@@ -109,6 +109,8 @@ type Options struct {
 	StartRetry         time.Duration // 10s after a failed StartRunner
 	RerunDelay         time.Duration // 30s after the lost job completes
 	AgeTTL             time.Duration // 2h: remembered job ages
+	PhantomGrace       time.Duration // 45s: deficit of known vs GitHub-assigned jobs before a placeholder
+	StatsMaxAge        time.Duration // 2m: lane stats older than this are ignored (initial ones excepted)
 
 	MaxParked   int // 4
 	MaxRunners  int // 0 = unlimited
@@ -177,6 +179,8 @@ func (o *Options) defaults() {
 	dur(&o.StartRetry, 10*time.Second)
 	dur(&o.RerunDelay, 30*time.Second)
 	dur(&o.AgeTTL, 2*time.Hour)
+	dur(&o.PhantomGrace, 45*time.Second)
+	dur(&o.StatsMaxAge, 2*time.Minute)
 	if o.DefaultJobMem <= 0 {
 		o.DefaultJobMem = 2 << 30
 	}
@@ -234,6 +238,7 @@ type JobStatus struct {
 	Cost     int64         `json:"cost"`
 	Pinned   int           `json:"pinned_cores,omitempty"`
 	Age      time.Duration `json:"age"`
+	Phantom  bool          `json:"phantom,omitempty"`
 }
 
 // LaneStatus is one lane in Status.

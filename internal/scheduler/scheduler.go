@@ -38,6 +38,7 @@ type jobRec struct {
 	unboundAt time.Time // non-zero: GitHub un-assigned it (reassign churn)
 	notBefore time.Time // earliest next start attempt
 	startedAt time.Time
+	phantom   bool // placeholder for a job GitHub assigned that we never heard of
 	rerun     bool // runner lost mid-job; rerun once after completion
 	cancelled bool // ForceCancelRun already sent
 }
@@ -62,6 +63,12 @@ type laneRec struct {
 	capSet bool
 	cap    int
 	stats  LaneStats
+
+	hasStats     bool
+	statsAt      time.Time
+	statsInitial bool      // first stats of this session: trusted past StatsMaxAge
+	changedAt    time.Time // last event that makes older stats misleading
+	deficitSince time.Time // when GitHub first showed more unstarted jobs than we know
 }
 
 type ageEntry struct {
@@ -350,6 +357,7 @@ func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
 		return
 	}
 	r = s.newJob(lk, j)
+	s.mergePhantom(r)
 	s.enqueue(r)
 	s.log.info("job assigned", "job", r.id, "run", j.RunID, "cost", r.cost, "pinned", r.pinned, "lane", lk.Lane)
 }
@@ -368,6 +376,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	if rec == nil {
 		rec = s.newJob(lk, j)
 	}
+	s.lane(lk).changedAt = s.now()
 	rec.job = j
 	rec.lane = lk
 	name := j.RunnerName
@@ -394,7 +403,9 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	}
 	if old := rr.job; old != nil && old != rec { // the runner took another job than we planned
 		old.rr = nil
-		if old.phase == pStarting {
+		if old.phantom {
+			s.forget(old) // the real job took the placeholder's runner
+		} else if old.phase == pStarting {
 			old.phase = pHeld
 		}
 	}
@@ -437,6 +448,7 @@ func (s *Scheduler) onCompleted(lk LaneKey, j core.Job) {
 		if rec.unboundAt.IsZero() {
 			rec.unboundAt = s.now()
 		}
+		s.lane(lk).changedAt = s.now()
 		if rec.phase == pHeld {
 			s.dequeue(rec)
 		}
@@ -462,6 +474,7 @@ func (s *Scheduler) finish(rec *jobRec, j core.Job) {
 		}
 	}
 	s.forget(rec)
+	s.lane(rec.lane).changedAt = now
 	delete(s.ages, rec.ageKey)
 	if rec.job.JobID != "" {
 		s.done[rec.job.JobID] = now
@@ -516,9 +529,14 @@ func (s *Scheduler) dropRunner(rr *runnerRec) {
 	rr.job = nil
 }
 
-// Stats records the service's view of a lane (status display only).
+// Stats records the service's view of a lane; a surplus of GitHub-assigned
+// unstarted jobs over the ones we know creates placeholder jobs (phantoms).
 func (s *Scheduler) Stats(key core.ScaleSetKey, lane int, st LaneStats) {
-	s.locked(func() { s.lane(LaneKey{key, lane}).stats = st })
+	s.locked(func() {
+		l := s.lane(LaneKey{key, lane})
+		l.statsInitial = !l.hasStats
+		l.hasStats, l.statsAt, l.stats = true, s.now(), st
+	})
 }
 
 // RunnerDied reports a runner that is no longer alive. oom says the kernel
@@ -901,6 +919,7 @@ func (s *Scheduler) policy() admission.Policy {
 
 // settle runs after every state change.
 func (s *Scheduler) settle() {
+	s.reconcilePhantoms()
 	s.grantLoop()
 	s.promote()
 	s.pumpWaiters()
@@ -1174,7 +1193,7 @@ func (s *Scheduler) Snapshot() Status {
 			js := JobStatus{
 				JobID: r.id, Owner: r.job.Owner, Repo: r.job.Repo, Workflow: admission.WorkflowFile(r.job.WorkflowRef),
 				Name: r.job.Name, RunID: r.job.RunID, State: s.jobState(r), Cost: r.cost, Pinned: r.pinned,
-				Age: now.Sub(r.age),
+				Age: now.Sub(r.age), Phantom: r.phantom,
 			}
 			if r.rr != nil {
 				js.Runner = r.rr.name
@@ -1201,3 +1220,110 @@ type logger struct {
 
 func (l logger) info(msg string, kv ...any) { l.l.Info(msg, kv...) }
 func (l logger) warn(msg string, kv ...any) { l.l.Warn(msg, kv...) }
+
+// ---- phantom jobs --------------------------------------------------------
+
+// reconcilePhantoms compares GitHub's count of assigned-unstarted jobs per lane
+// (Assigned - Running) with the ones we know. A deficit that lasts PhantomGrace
+// (a lost JobAssigned, e.g. after a restart) gets placeholder jobs that go
+// through normal admission, so a runner starts and takes the real job.
+func (s *Scheduler) reconcilePhantoms() {
+	now := s.now()
+	for _, l := range s.sortedLanes() {
+		if !l.hasStats {
+			continue
+		}
+		// Stats older than the last state change, or past StatsMaxAge (except
+		// the session's initial stats), say nothing reliable.
+		if l.statsAt.Add(2*time.Second).Before(l.changedAt) || (!l.statsInitial && now.Sub(l.statsAt) > s.o.StatsMaxAge) {
+			continue
+		}
+		known := 0
+		var ph []*jobRec
+		for _, r := range s.sortedJobs() {
+			switch {
+			case r.lane != l.key:
+			case r.phantom:
+				ph = append(ph, r)
+			case (r.phase == pHeld || r.phase == pStarting) && r.unboundAt.IsZero():
+				known++
+			}
+		}
+		for _, rr := range s.runners {
+			if rr.lane == l.key && rr.job == nil {
+				known++ // spare runner: it will take the oldest assigned job
+			}
+		}
+		need := max(0, l.stats.Assigned-l.stats.Running) - known
+		if need <= 0 {
+			l.deficitSince = time.Time{}
+			for _, p := range ph {
+				s.dropPhantom(p)
+			}
+			continue
+		}
+		if l.deficitSince.IsZero() {
+			l.deficitSince = now
+		}
+		for len(ph) > need { // drop placeholders without a runner first
+			i := slices.IndexFunc(ph, func(p *jobRec) bool { return p.rr == nil })
+			if i < 0 {
+				i = len(ph) - 1
+			}
+			s.dropPhantom(ph[i])
+			ph = slices.Delete(ph, i, i+1)
+		}
+		if s.drain || now.Sub(l.deficitSince) < s.o.PhantomGrace {
+			continue
+		}
+		for len(ph) < need {
+			s.seq++
+			id := fmt.Sprintf("phantom-%d", s.seq)
+			r := &jobRec{
+				id: id, lane: l.key, seq: s.seq, phantom: true, cost: s.o.DefaultJobMem,
+				age: l.deficitSince, ageKey: "phantom|" + id,
+				job: core.Job{JobID: id, Owner: l.key.Target.Owner, Repo: l.key.Target.Repo, Name: "(unknown)", ScaleSet: l.key.ScaleSetKey},
+			}
+			s.jobs[id] = r
+			s.enqueue(r)
+			ph = append(ph, r)
+			s.log.warn("assigned job unknown; placeholder created", "lane", l.key.Lane, "assigned", l.stats.Assigned, "running", l.stats.Running)
+		}
+	}
+}
+
+// dropPhantom removes a placeholder; a runner already started for it stays as
+// a spare that will take the next assigned job.
+func (s *Scheduler) dropPhantom(p *jobRec) {
+	s.forget(p)
+	if rr := p.rr; rr != nil {
+		rr.job, p.rr = nil, nil
+		s.shrink(rr)
+	}
+}
+
+// mergePhantom lets a late real JobAssigned replace a placeholder in its lane,
+// taking over the placeholder's runner and age so nothing starts twice.
+func (s *Scheduler) mergePhantom(real *jobRec) {
+	var ph *jobRec
+	for _, r := range s.sortedJobs() {
+		if r.phantom && r.lane == real.lane && r.phase != pBound && (ph == nil || (ph.rr == nil && r.rr != nil)) {
+			ph = r
+		}
+	}
+	if ph == nil {
+		return
+	}
+	if ph.age.Before(real.age) {
+		real.age = ph.age
+	}
+	if rr := ph.rr; rr != nil {
+		ph.rr = nil
+		rr.job, real.rr = real, rr
+		real.phase = pStarting
+		if rr.full {
+			_, _ = s.led.ForceResize(rr.tok, s.fullReq(real))
+		}
+	}
+	s.forget(ph)
+}
