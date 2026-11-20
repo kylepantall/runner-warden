@@ -386,25 +386,28 @@ func TestNeverJobRecyclesRunner(t *testing.T) {
 	_ = j
 }
 
-func TestRunnerDeathForceCancelsAndRerunsOnce(t *testing.T) {
+func TestRunnerDeathRerunsOnlyTheLostJobOnce(t *testing.T) {
 	h := newHarness(t, func(o *Options) { o.RerunOnLoss = true })
 	l := lane("a", 1)
 	j := h.assign(l, h.job("a", "x"))
+	sib := h.assign(lane("a", 2), h.job("a", "sibling"))
+	h.begin(lane("a", 2), sib)
 	rn := h.begin(l, j)
 	h.s.RunnerDied(rn, false)
 	h.wait()
-	if len(h.run.cancels) != 1 || h.run.cancels[0] != j.RunID {
-		t.Fatalf("cancels=%v", h.run.cancels)
-	}
 	h.s.RunnerDied(rn, false)
 	h.wait()
-	if len(h.run.cancels) != 1 {
-		t.Fatal("cancel only once")
+	if len(h.run.cancels) != 0 {
+		t.Fatal("a lost runner must not cancel the run (matrix siblings)")
+	}
+	h.tick(time.Minute)
+	if len(h.run.reruns) != 0 {
+		t.Fatal("rerun waits for GitHub to fail the lost job")
 	}
 	h.done(l, j, rn, "canceled")
 	h.tick(time.Minute)
-	if len(h.run.reruns) != 1 {
-		t.Fatalf("reruns=%v", h.run.reruns)
+	if len(h.run.reruns) != 1 || len(h.run.cancels) != 0 {
+		t.Fatalf("reruns=%v cancels=%v", h.run.reruns, h.run.cancels)
 	}
 	// same run+job lost again: never rerun twice
 	j2 := j
@@ -419,7 +422,7 @@ func TestRunnerDeathForceCancelsAndRerunsOnce(t *testing.T) {
 	}
 }
 
-func TestOOMDeathCancelsWithoutRerun(t *testing.T) {
+func TestOOMDeathDoesNotRerun(t *testing.T) {
 	h := newHarness(t, func(o *Options) { o.RerunOnLoss = true })
 	l := lane("a", 1)
 	j := h.assign(l, h.job("a", "x"))
@@ -428,7 +431,7 @@ func TestOOMDeathCancelsWithoutRerun(t *testing.T) {
 	h.wait()
 	h.done(l, j, rn, "canceled")
 	h.tick(time.Minute)
-	if len(h.run.cancels) != 1 || len(h.run.reruns) != 0 {
+	if len(h.run.cancels) != 0 || len(h.run.reruns) != 0 {
 		t.Fatalf("cancels=%v reruns=%v", h.run.cancels, h.run.reruns)
 	}
 }

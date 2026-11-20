@@ -40,7 +40,7 @@ type jobRec struct {
 	startedAt time.Time
 	phantom   bool // placeholder for a job GitHub assigned that we never heard of
 	rerun     bool // runner lost mid-job; rerun once after completion
-	cancelled bool // ForceCancelRun already sent
+	synthetic bool // id is ours (job id unknown): match events by runner name
 }
 
 type runnerRec struct {
@@ -55,6 +55,7 @@ type runnerRec struct {
 	hookOK    bool
 	jobDone   bool // job-completed hook seen: a later exit is normal
 	released  bool
+	vmKey     string // ledger key of the pending VM reservation, "" once converted
 }
 
 type laneRec struct {
@@ -110,6 +111,7 @@ type Scheduler struct {
 	byName  map[string]*runnerRec
 	waiters []*hookWaiter
 	reaps   map[string]time.Time
+	stopped map[string]time.Time // runners already sent to StopRunner: stop once
 	done    map[string]time.Time // recently finished job ids: late events are ignored
 	reruns  []rerunReq
 	reran   map[string]bool
@@ -134,6 +136,7 @@ func New(o Options) *Scheduler {
 		runners: map[string]*runnerRec{},
 		byName:  map[string]*runnerRec{},
 		reaps:   map[string]time.Time{},
+		stopped: map[string]time.Time{},
 		done:    map[string]time.Time{},
 		reran:   map[string]bool{},
 		stats:   map[LaneKey]LaneStats{},
@@ -205,13 +208,53 @@ func (s *Scheduler) lane(lk LaneKey) *laneRec {
 
 func (s *Scheduler) overhead() admission.Request { return admission.Request{Mem: s.o.RunnerOverhead} }
 
+// vmManaged reports lanes whose jobs run in a VM the scheduler budgets for.
+func (s *Scheduler) vmManaged(lk LaneKey) bool {
+	return s.o.VMCost != nil && lk.OS == core.Windows
+}
+
+// fullReq is what a runner holds for the job. On VM-managed lanes the VM's
+// memory (reserved separately) is the job's memory, so only overhead remains.
 func (s *Scheduler) fullReq(r *jobRec) admission.Request {
+	if s.vmManaged(r.lane) {
+		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned}
+	}
 	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned}
 }
 
-func ageKeyOf(j core.Job) string {
+// vmNeed is the VM memory a new grant on lk must reserve: zero unless the lane
+// is VM-managed and no suitable VM is up.
+func (s *Scheduler) vmNeed(lk LaneKey) int64 {
+	if !s.vmManaged(lk) {
+		return 0
+	}
+	if mem, up := s.o.VMCost(lk); !up {
+		return mem
+	}
+	return 0
+}
+
+// heldCores is how many pinned cores the runner was started with.
+func (s *Scheduler) heldCores(rr *runnerRec) int {
+	r, _ := s.led.Get(rr.tok)
+	return len(r.Cores)
+}
+
+// reqFor is fullReq for a job on an existing runner. A container's cpuset is
+// fixed when it is created, so a runner never gains or changes pinned cores.
+func (s *Scheduler) reqFor(rr *runnerRec, rec *jobRec) admission.Request {
+	req := s.fullReq(rec)
+	held := s.heldCores(rr)
+	if rec.pinned > held {
+		s.log.warn("pinned job on a runner started without those cores", "job", rec.id, "runner", rr.name, "want", rec.pinned, "have", held)
+	}
+	req.PinnedCores = held
+	return req
+}
+
+func ageKeyOf(id string, j core.Job) string {
 	if j.RunID == 0 {
-		return "id|" + j.JobID
+		return "id|" + id
 	}
 	return fmt.Sprintf("%d|%s", j.RunID, j.Name)
 }
@@ -279,24 +322,65 @@ func (s *Scheduler) dequeue(r *jobRec) {
 // ---- job lookup ----------------------------------------------------------
 
 func (s *Scheduler) findJob(j core.Job) *jobRec {
-	if r := s.jobs[j.JobID]; r != nil {
-		return r
+	if j.JobID != "" {
+		if r := s.jobs[j.JobID]; r != nil {
+			return r
+		}
 	}
-	if j.RunID != 0 {
-		if r := s.byAge[ageKeyOf(j)]; r != nil {
-			delete(s.jobs, r.id) // GitHub re-issued the job under a new id
-			r.id = j.JobID
-			s.jobs[r.id] = r
+	// An empty or unknown id matches the job of the runner named in the event;
+	// unknown ids only for jobs whose own id we never knew.
+	if j.RunnerName != "" {
+		if rr := s.byName[j.RunnerName]; rr != nil && rr.job != nil && (j.JobID == "" || rr.job.synthetic) {
+			s.adoptID(rr.job, j.JobID)
+			return rr.job
+		}
+	}
+	if j.RunID != 0 && j.JobID != "" {
+		if r := s.byAge[ageKeyOf(j.JobID, j)]; r != nil {
+			s.adoptID(r, j.JobID) // GitHub re-issued the job under a new id
 			return r
 		}
 	}
 	return nil
 }
 
+// adoptID re-keys a job under the id GitHub uses for it.
+func (s *Scheduler) adoptID(r *jobRec, id string) {
+	if id == "" || r.id == id || s.jobs[id] != nil {
+		return
+	}
+	delete(s.jobs, r.id)
+	r.id, r.synthetic = id, false
+	r.job.JobID = id
+	s.jobs[id] = r
+}
+
+// setJob refreshes a job's identity from an event; an event without an id
+// only contributes the runner name.
+func setJob(r *jobRec, j core.Job) {
+	if j.JobID == "" {
+		if j.RunnerName != "" {
+			r.job.RunnerName = j.RunnerName
+		}
+		return
+	}
+	r.job = j
+}
+
 func (s *Scheduler) newJob(lk LaneKey, j core.Job) *jobRec {
 	now := s.now()
-	r := &jobRec{id: j.JobID, job: j, lane: lk, ageKey: ageKeyOf(j), age: now}
 	s.seq++
+	id := j.JobID
+	if id == "" { // never key on an empty id: restored jobs may not have one
+		id = fmt.Sprintf("anon-%d", s.seq)
+		if j.RunnerName != "" {
+			id = "restored-" + j.RunnerName
+			if s.jobs[id] != nil {
+				id = fmt.Sprintf("%s-%d", id, s.seq)
+			}
+		}
+	}
+	r := &jobRec{id: id, job: j, lane: lk, ageKey: ageKeyOf(id, j), age: now, synthetic: j.JobID == ""}
 	r.seq = s.seq
 	r.cost = s.o.DefaultJobMem
 	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
@@ -344,7 +428,7 @@ func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
 		if r.phase == pBound {
 			return // stale: already started
 		}
-		r.job = j
+		setJob(r, j)
 		if a, ok := s.ages[r.ageKey]; ok {
 			s.ages[r.ageKey] = ageEntry{t: a.t, seen: s.now()}
 		}
@@ -352,7 +436,16 @@ func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
 			r.unboundAt = time.Time{}
 			s.log.info("job reassigned", "job", r.id, "lane", lk.Lane)
 		}
-		r.lane = lk
+		if lk != r.lane { // churn moved it to another lane
+			s.dequeue(r)
+			if rr := r.rr; rr != nil { // its runner would wait in the old lane: spare there
+				r.rr, rr.job = nil, nil
+				s.shrink(rr)
+				r.phase = pHeld
+				s.log.info("job moved lane, runner detached", "job", r.id, "from", r.lane.Lane, "to", lk.Lane)
+			}
+			r.lane = lk
+		}
 		s.enqueue(r) // no-op when still queued
 		return
 	}
@@ -377,7 +470,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 		rec = s.newJob(lk, j)
 	}
 	s.lane(lk).changedAt = s.now()
-	rec.job = j
+	setJob(rec, j)
 	rec.lane = lk
 	name := j.RunnerName
 	var rr *runnerRec
@@ -395,7 +488,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	if rr == nil { // a runner we did not start (restart, adoption)
 		s.seq++
 		rr = &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: name, lane: lk, createdAt: s.now(), full: true}
-		s.led.Force(rr.tok, s.fullReq(rec))
+		s.led.Force(rr.tok, s.fullReq(rec)) // cpuset unknown: only the count is tracked
 		s.runners[rr.tok] = rr
 		if name != "" {
 			s.byName[name] = rr
@@ -403,7 +496,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	}
 	if old := rr.job; old != nil && old != rec { // the runner took another job than we planned
 		old.rr = nil
-		if old.phantom {
+		if old.phantom || (old.synthetic && old.phase == pBound) {
 			s.forget(old) // the real job took the placeholder's runner
 		} else if old.phase == pStarting {
 			old.phase = pHeld
@@ -419,7 +512,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	rec.unboundAt = time.Time{}
 	rec.startedAt = s.now()
 	if rr.full {
-		_, _ = s.led.ForceResize(rr.tok, s.fullReq(rec))
+		_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, rec))
 	} else {
 		rr.parked = true // waits in the hook until the ledger grants the rest
 	}
@@ -428,7 +521,9 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 
 // shrink drops a runner's reservation to idle overhead.
 func (s *Scheduler) shrink(rr *runnerRec) {
-	_, _ = s.led.ForceResize(rr.tok, s.overhead())
+	req := s.overhead()
+	req.PinnedCores = s.heldCores(rr) // the cpuset stays with the container
+	_, _ = s.led.ForceResize(rr.tok, req)
 	rr.full, rr.parked, rr.hookOK = false, false, false
 }
 
@@ -476,8 +571,10 @@ func (s *Scheduler) finish(rec *jobRec, j core.Job) {
 	s.forget(rec)
 	s.lane(rec.lane).changedAt = now
 	delete(s.ages, rec.ageKey)
-	if rec.job.JobID != "" {
-		s.done[rec.job.JobID] = now
+	for _, id := range []string{rec.job.JobID, j.JobID} {
+		if id != "" {
+			s.done[id] = now
+		}
 	}
 	runner := j.RunnerName
 	if rr != nil {
@@ -494,6 +591,9 @@ func (s *Scheduler) finish(rec *jobRec, j core.Job) {
 		}
 	}
 	if o := s.o.Observer; o != nil {
+		if rec.job.JobID == "" {
+			rec.job.JobID = j.JobID
+		}
 		res := JobResult{Job: rec.job, Lane: rec.lane, Runner: runner, Cost: rec.cost, Result: j.Result, Started: rec.startedAt, Finished: now}
 		res.Job.Result = j.Result
 		s.effect(func(context.Context) { o.JobFinished(res) })
@@ -523,6 +623,10 @@ func (s *Scheduler) dropRunner(rr *runnerRec) {
 		delete(s.byName, rr.name)
 	}
 	rr.released = true
+	if rr.vmKey != "" { // the VM never came up (or is gone): its reservation goes too
+		s.led.Release(rr.vmKey)
+		rr.vmKey = ""
+	}
 	if rr.job != nil && rr.job.rr == rr {
 		rr.job.rr = nil
 	}
@@ -540,42 +644,44 @@ func (s *Scheduler) Stats(key core.ScaleSetKey, lane int, st LaneStats) {
 }
 
 // RunnerDied reports a runner that is no longer alive. oom says the kernel
-// killed it for memory (no rerun then).
+// killed it for memory (no rerun then). The runner is always reaped (stopped:
+// container, dirs, registration, VM): at once when it had no job or its job is
+// done, after ReapGrace when it died mid-job. The run is not cancelled: GitHub
+// fails the lost job by itself, and only that job is rerun afterwards.
 func (s *Scheduler) RunnerDied(name string, oom bool) {
 	s.locked(func() {
 		rr := s.byName[name]
-		if rr == nil {
+		if rr == nil { // already released (job completed) or never known
+			s.reapNow(name)
 			return
 		}
 		rec := rr.job
 		s.dropRunner(rr)
-		if rec == nil {
-			return
-		}
-		if rec.phase != pBound { // died before taking the job: plan a new runner
+		switch {
+		case rec == nil:
+			s.reapNow(name)
+		case rec.phase != pBound: // died before taking the job: plan a new runner
 			if rec.phase == pStarting {
 				rec.phase = pHeld
 				rec.notBefore = s.now().Add(s.o.StartRetry)
 			}
-			return
-		}
-		if rr.jobDone || rec.cancelled {
-			return // normal exit after the job finished
-		}
-		rec.cancelled = true
-		if !oom && s.o.RerunOnLoss {
-			rec.rerun = true
-		}
-		s.log.warn("runner died mid-job", "runner", name, "job", rec.id, "oom", oom)
-		if rec.job.RunID != 0 {
-			j := rec.job
-			s.effect(func(ctx context.Context) {
-				if err := s.o.Runners.ForceCancelRun(ctx, j.Owner, j.Repo, j.RunID); err != nil {
-					s.log.warn("force cancel failed", "run", j.RunID, "err", err.Error())
-				}
-			})
+			s.reapNow(name)
+		case rr.jobDone:
+			s.reapNow(name) // normal exit after the job finished
+		default:
+			if !oom && s.o.RerunOnLoss {
+				rec.rerun = true // rerun just this job once its Completed arrives
+			}
+			s.log.warn("runner died mid-job", "runner", name, "job", rec.id, "oom", oom)
+			s.reaps[name] = s.now().Add(s.o.ReapGrace)
 		}
 	})
+}
+
+// reapNow stops the runner at once, replacing any pending delayed reap.
+func (s *Scheduler) reapNow(name string) {
+	delete(s.reaps, name)
+	s.stop(name)
 }
 
 // Drain stops new work: capacity becomes started (no spare slot) and no new
@@ -615,9 +721,16 @@ func (s *Scheduler) Restore(rs []RestoredRunner) {
 				s.led.Force(rr.tok, s.overhead())
 				continue
 			}
-			rec := s.findJob(*r.Job)
+			jb := *r.Job
+			if jb.RunnerName == "" {
+				jb.RunnerName = r.Name
+			}
+			var rec *jobRec
+			if jb.JobID != "" { // the store may not have kept the id
+				rec = s.findJob(jb)
+			}
 			if rec == nil {
-				rec = s.newJob(r.Lane, *r.Job)
+				rec = s.newJob(r.Lane, jb)
 			}
 			rec.rr, rr.job = rr, rec
 			rr.full = true
@@ -640,6 +753,11 @@ func (s *Scheduler) HookCompleted(req HookRequest) bool {
 	known := false
 	s.locked(func() {
 		if rr := s.lookup(req); rr != nil {
+			if rr.job == nil { // its job started while we were down
+				rec := s.bindFromHook(rr, req)
+				_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, rec))
+				rr.full, rr.hookOK = true, true
+			}
 			rr.jobDone = true
 			known = true
 		}
@@ -662,12 +780,37 @@ func (s *Scheduler) lookup(req HookRequest) *runnerRec {
 	return nil
 }
 
+// bindFromHook gives a runner that has no job (its job started while the
+// daemon was down) one built from the hook request, costed from the rules as
+// far as the request identifies it, and marks it started. GITHUB_WORKFLOW is
+// a name rather than a file, so a rule only matches it by pattern.
+func (s *Scheduler) bindFromHook(rr *runnerRec, req HookRequest) *jobRec {
+	j := core.Job{
+		RunID: req.RunID, Owner: rr.lane.Target.Owner, Repo: rr.lane.Target.Repo,
+		Name: req.JobKey, WorkflowRef: req.Workflow, RunnerName: rr.name, ScaleSet: rr.lane.ScaleSetKey,
+	}
+	if o, r, ok := strings.Cut(req.Repository, "/"); ok && o != "" && r != "" {
+		j.Owner, j.Repo = o, r
+	}
+	rec := s.newJob(rr.lane, j)
+	rec.rr, rr.job = rr, rec
+	rec.phase = pBound
+	rec.startedAt = s.now()
+	rr.full, rr.parked = false, false
+	s.lane(rr.lane).changedAt = s.now()
+	s.log.info("job bound from hook", "job", rec.id, "runner", rr.name, "run", req.RunID, "cost", rec.cost)
+	return rec
+}
+
 // Hook is the job-started hook: it returns once the runner's job holds its
 // full reservation, or with a deny verdict after AdmissionTimeout.
 func (s *Scheduler) Hook(ctx context.Context, req HookRequest) (HookResponse, error) {
 	var w *hookWaiter
 	s.locked(func() {
 		now := s.now()
+		if rr := s.lookup(req); rr != nil && rr.job == nil {
+			s.bindFromHook(rr, req).rr.parked = true // waits for its memory like any started job
+		}
 		w = &hookWaiter{req: req, since: now, deadline: now.Add(s.o.AdmissionTimeout), ch: make(chan HookResponse, 1)}
 		s.waiters = append(s.waiters, w)
 	})
@@ -764,6 +907,11 @@ func (s *Scheduler) Tick() {
 				delete(s.done, id)
 			}
 		}
+		for name, at := range s.stopped {
+			if now.Sub(at) > s.o.AgeTTL {
+				delete(s.stopped, name)
+			}
+		}
 		for name, due := range s.reaps {
 			if !now.Before(due) {
 				delete(s.reaps, name)
@@ -812,7 +960,12 @@ func (s *Scheduler) sortedJobs() []*jobRec {
 	return out
 }
 
+// stop sends StopRunner once per runner, however many paths ask for it.
 func (s *Scheduler) stop(name string) {
+	if _, ok := s.stopped[name]; ok {
+		return
+	}
+	s.stopped[name] = s.now()
 	s.effect(func(ctx context.Context) {
 		if err := s.o.Runners.StopRunner(ctx, name); err != nil {
 			s.log.warn("stop runner failed", "runner", name, "err", err.Error())
@@ -823,16 +976,44 @@ func (s *Scheduler) stop(name string) {
 func (s *Scheduler) syncVMs(up map[string]int64) {
 	for name, mem := range up {
 		key := "vm:" + name
-		if r, ok := s.led.Get(key); !ok || r.Mem != mem {
+		r, ok := s.led.Get(key)
+		if !ok {
+			s.convertPendingVM(mem) // a grant already reserved this VM's memory
+		}
+		if !ok || r.Mem != mem {
 			s.led.Force(key, admission.Request{Mem: mem})
 		}
 	}
 	for _, key := range s.led.Keys() {
-		if name, ok := strings.CutPrefix(key, "vm:"); ok {
+		if name, ok := strings.CutPrefix(key, "vm:"); ok && !strings.HasPrefix(name, pendingVM) {
 			if _, still := up[name]; !still {
 				s.led.Release(key)
 			}
 		}
+	}
+}
+
+const pendingVM = "pending:"
+
+// convertPendingVM drops the pending reservation a newly seen VM replaces:
+// the oldest one of the same size, else the oldest.
+func (s *Scheduler) convertPendingVM(mem int64) {
+	var pick *runnerRec
+	for _, rr := range s.sortedRunners() {
+		if rr.vmKey == "" {
+			continue
+		}
+		if r, ok := s.led.Get(rr.vmKey); ok && r.Mem == mem {
+			pick = rr
+			break
+		}
+		if pick == nil {
+			pick = rr
+		}
+	}
+	if pick != nil {
+		s.led.Release(pick.vmKey)
+		pick.vmKey = ""
 	}
 }
 
@@ -888,12 +1069,12 @@ func (s *Scheduler) candidates() []cand {
 func (s *Scheduler) oldestWaiter() *admission.Waiter {
 	var ws []admission.Waiter
 	for _, r := range s.heads() {
-		if s.led.FitsEver(s.fullReq(r)) {
+		if s.fitsEver(r) {
 			ws = append(ws, s.waiter(r))
 		}
 	}
 	for _, rr := range s.sortedRunners() {
-		if rr.parked && !rr.full && rr.job != nil && s.led.FitsEver(s.fullReq(rr.job)) {
+		if rr.parked && !rr.full && rr.job != nil && s.fitsEver(rr.job) {
 			ws = append(ws, s.waiter(rr.job))
 		}
 	}
@@ -901,6 +1082,16 @@ func (s *Scheduler) oldestWaiter() *admission.Waiter {
 		return &ws[i]
 	}
 	return nil
+}
+
+// fitsEver is FitsEver for the job including the VM it may need.
+func (s *Scheduler) fitsEver(r *jobRec) bool {
+	req := s.fullReq(r)
+	if s.vmManaged(r.lane) {
+		vm, _ := s.o.VMCost(r.lane)
+		req.Mem += vm
+	}
+	return s.led.FitsEver(req)
 }
 
 func (s *Scheduler) granted() map[string]int64 {
@@ -972,7 +1163,7 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 		return false
 	}
 	if c.parked {
-		if _, err := s.led.Resize(rec.rr.tok, s.fullReq(rec)); err != nil {
+		if _, err := s.led.Resize(rec.rr.tok, s.reqFor(rec.rr, rec)); err != nil {
 			return false
 		}
 		rec.rr.full, rec.rr.parked = true, false
@@ -984,12 +1175,34 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	}
 	s.seq++
 	tok := fmt.Sprintf("r%d", s.seq)
-	res, err := s.led.Reserve(tok, s.fullReq(rec))
-	if err != nil {
+	res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec))
+	if !ok {
 		return false
 	}
-	s.startRunner(rec, tok, s.seq, res, false)
+	s.startRunner(rec, tok, s.seq, res, false, vmKey)
 	return true
+}
+
+// reserveRunner reserves tok and, on a VM-managed lane with no suitable VM up,
+// the memory of the VM that StartRunner is about to boot, or nothing.
+func (s *Scheduler) reserveRunner(rec *jobRec, tok string, req admission.Request) (admission.Reservation, string, bool) {
+	vm := s.vmNeed(rec.lane)
+	if !s.led.CanFit(admission.Request{Mem: req.Mem + vm, PinnedCores: req.PinnedCores}) {
+		return admission.Reservation{}, "", false
+	}
+	res, err := s.led.Reserve(tok, req)
+	if err != nil {
+		return admission.Reservation{}, "", false
+	}
+	if vm == 0 {
+		return res, "", true
+	}
+	key := "vm:" + pendingVM + rec.id
+	if _, err := s.led.Reserve(key, admission.Request{Mem: vm}); err != nil {
+		s.led.Release(tok)
+		return admission.Reservation{}, "", false
+	}
+	return res, key, true
 }
 
 func (s *Scheduler) canStartRunner(t core.Target) bool {
@@ -1003,8 +1216,8 @@ func (s *Scheduler) canStartRunner(t core.Target) bool {
 	return true
 }
 
-func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool) {
-	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now()}
+func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool, vmKey string) {
+	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey}
 	s.runners[tok] = rr
 	rec.rr, rec.phase = rr, pStarting
 	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job}
@@ -1103,12 +1316,16 @@ func (s *Scheduler) promote() {
 			}
 			s.seq++
 			tok := fmt.Sprintf("r%d", s.seq)
-			res, err := s.led.Reserve(tok, s.overhead())
-			if err != nil {
+			// Pinned cores are fixed when the runner starts, so a parked runner
+			// takes the job's cores now or is not promoted.
+			req := s.overhead()
+			req.PinnedCores = rec.pinned
+			res, vmKey, ok := s.reserveRunner(rec, tok, req)
+			if !ok {
 				continue
 			}
 			s.log.info("promoting held job to parked runner", "job", rec.id, "lane", rec.lane.Lane)
-			s.startRunner(rec, tok, s.seq, res, true)
+			s.startRunner(rec, tok, s.seq, res, true, vmKey)
 			return
 		}
 	}
@@ -1322,7 +1539,7 @@ func (s *Scheduler) mergePhantom(real *jobRec) {
 		rr.job, real.rr = real, rr
 		real.phase = pStarting
 		if rr.full {
-			_, _ = s.led.ForceResize(rr.tok, s.fullReq(real))
+			_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, real))
 		}
 	}
 	s.forget(ph)

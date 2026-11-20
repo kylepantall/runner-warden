@@ -122,6 +122,15 @@ type Options struct {
 	// JobTimeout optionally returns a job's timeout-minutes (0 = unknown); it
 	// only biases which held job gets promoted to a parked runner.
 	JobTimeout func(core.Job) time.Duration
+
+	// VMCost serves Windows lanes, whose jobs run inside a VM. It returns the
+	// memory a VM for this lane reserves and whether a suitable VM is already
+	// up (its memory is then mirrored in the ledger through VMs). It runs under
+	// the scheduler lock and must not block or call back. Without a suitable VM
+	// a grant also reserves vmMem as "vm:pending:<job>" before StartRunner; the
+	// job's own cost is then overhead only, because the VM's memory is what the
+	// job uses. Nil keeps the plain per-job cost on every lane.
+	VMCost func(LaneKey) (vmMem int64, alreadyUp bool)
 }
 
 // OptionsFromConfig fills the config-driven fields. lanes lists every lane the
