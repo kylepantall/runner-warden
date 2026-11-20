@@ -378,3 +378,26 @@ func TestParkedRunnerGetsItsCoresAtStart(t *testing.T) {
 	}
 	_ = p
 }
+
+// A runner GitHub reports busy, whose job we never saw, must not be recycled
+// as a never-job runner, and its Completed (matched by runner name) frees it.
+func TestRestoreBusyRunnerWithoutJob(t *testing.T) {
+	h := newHarness(t, nil)
+	l := lane("o", 1)
+	h.s.Restore([]RestoredRunner{{Name: "rn-x", Lane: l, Started: true}})
+	h.wait()
+	h.tick(h.s.o.NeverJob + time.Minute)
+	h.run.mu.Lock()
+	stops := len(h.run.stops)
+	h.run.mu.Unlock()
+	if stops != 0 {
+		t.Fatalf("busy restored runner stopped %d times", stops)
+	}
+	h.done(l, core.Job{JobID: "real-1", Owner: "o", Repo: "r", Name: "x"}, "rn-x", "succeeded")
+	h.tick(h.s.o.ReapGrace + time.Second)
+	h.run.mu.Lock()
+	defer h.run.mu.Unlock()
+	if len(h.run.stops) != 1 {
+		t.Fatalf("runner not reaped after completion: stops=%d", len(h.run.stops))
+	}
+}

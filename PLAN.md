@@ -86,7 +86,8 @@ GitHub assigns FIFO, can't be told *which* job, but honours `maxCapacity` and le
 | Oldest held job older than `reserve_after` (5 min) | Only light jobs may overtake (anti-starvation) |
 | All lanes of a target held > `hol_grace` (2 min) | Promote one job into the hook-wait (timeout ticks) to free a lane |
 | Reassign churn (`canceled`, empty runner) | Treated as unbind; job keeps its age |
-| Runner dies mid-job | Force-cancel immediately (don't wait GitHub's 14 min); single re-run if the loss wasn't an OOM |
+| Runner dies mid-job | Never cancel the run (it would kill matrix siblings). The runner is reaped; GitHub fails just that job (≈14 min); it is re-run once unless the loss was an OOM |
+| Hung job | Stop its runner only; GitHub fails that job; no re-run |
 | Drain | Capacity = started; held jobs stay queued |
 | Multi-host (later) | A full host drops the `+1`; GitHub routes to the other host's lanes [V] |
 

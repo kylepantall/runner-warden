@@ -717,11 +717,19 @@ func (s *Scheduler) Restore(rs []RestoredRunner) {
 			}
 			s.runners[rr.tok] = rr
 			s.byName[rr.name] = rr
-			if r.Job == nil {
+			if r.Job == nil && !r.Started {
 				s.led.Force(rr.tok, s.overhead())
 				continue
 			}
-			jb := *r.Job
+			var jb core.Job
+			if r.Job != nil {
+				jb = *r.Job
+			} else {
+				// GitHub reports it busy but we never saw its job (it started
+				// while we were down): bind an anonymous job so NeverJob does not
+				// recycle it; Completed matches it by runner name.
+				jb = core.Job{Owner: r.Lane.Target.Owner, Repo: r.Lane.Target.Repo, Name: "(unknown)", ScaleSet: r.Lane.ScaleSetKey}
+			}
 			if jb.RunnerName == "" {
 				jb.RunnerName = r.Name
 			}
