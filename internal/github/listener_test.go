@@ -69,7 +69,7 @@ func TestDispatchOrderAndConversion(t *testing.T) {
 	if err := l.handle(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"reassigned", "completed", "completed", "assigned", "started"}
+	want := []string{"reassigned", "assigned", "started", "completed", "completed"}
 	got := r.kinds()
 	if len(got) != len(want) {
 		t.Fatalf("events %v", got)

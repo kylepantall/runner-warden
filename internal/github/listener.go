@@ -48,10 +48,11 @@ type sessionOpener func(ctx context.Context, owner string) (Session, error)
 // Listener runs the scale-set long poll for one scale set.
 //
 // Order of event delivery within one message (deterministic):
-//  1. Completed / Reassigned, in message order
+//  1. Reassigned (canceled with no runner), in message order
 //  2. Assigned
 //  3. Started
-//  4. Stats (initial session statistics arrive as a synthetic first message)
+//  4. Completed (after Started: a short job's Started and Completed can share a message)
+//  5. Stats (initial session statistics arrive as a synthetic first message)
 //
 // JobAvailable messages are ignored (the service never sends them for scale
 // sets; jobs arrive as JobAssigned).
@@ -223,7 +224,11 @@ func (l *Listener) handle(_ context.Context, m *scaleset.RunnerScaleSetMessage) 
 	return nil
 }
 
+// dispatch delivers events in lifecycle order. A short job's Started and
+// Completed can share one message, so Started must come before Completed;
+// a reassignment (canceled, no runner) precedes the Assigned that follows it.
 func (l *Listener) dispatch(m *scaleset.RunnerScaleSetMessage) {
+	var completed []core.Job
 	for _, j := range m.JobCompletedMessages {
 		job := l.job(j.JobMessageBase)
 		job.RunnerName, job.RunnerID, job.Result = j.RunnerName, j.RunnerID, j.Result
@@ -231,7 +236,7 @@ func (l *Listener) dispatch(m *scaleset.RunnerScaleSetMessage) {
 			l.events.Reassigned(l.key, job)
 			continue
 		}
-		l.events.Completed(l.key, job)
+		completed = append(completed, job)
 	}
 	for _, j := range m.JobAssignedMessages {
 		l.events.Assigned(l.key, l.job(j.JobMessageBase))
@@ -240,6 +245,9 @@ func (l *Listener) dispatch(m *scaleset.RunnerScaleSetMessage) {
 		job := l.job(j.JobMessageBase)
 		job.RunnerName, job.RunnerID = j.RunnerName, j.RunnerID
 		l.events.Started(l.key, job)
+	}
+	for _, job := range completed {
+		l.events.Completed(l.key, job)
 	}
 	if len(m.JobAvailableMessages) > 0 {
 		l.log.Debug("job available messages ignored", "count", len(m.JobAvailableMessages))

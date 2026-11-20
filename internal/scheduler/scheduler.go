@@ -103,6 +103,7 @@ type Scheduler struct {
 	byName  map[string]*runnerRec
 	waiters []*hookWaiter
 	reaps   map[string]time.Time
+	done    map[string]time.Time // recently finished job ids: late events are ignored
 	reruns  []rerunReq
 	reran   map[string]bool
 	stats   map[LaneKey]LaneStats
@@ -126,6 +127,7 @@ func New(o Options) *Scheduler {
 		runners: map[string]*runnerRec{},
 		byName:  map[string]*runnerRec{},
 		reaps:   map[string]time.Time{},
+		done:    map[string]time.Time{},
 		reran:   map[string]bool{},
 		stats:   map[LaneKey]LaneStats{},
 		led: admission.New(admission.Config{
@@ -327,6 +329,9 @@ func (s *Scheduler) Reassigned(key core.ScaleSetKey, lane int, j core.Job) {
 }
 
 func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
+	if s.isDone(j) {
+		return
+	}
 	r := s.findJob(j)
 	if r != nil {
 		if r.phase == pBound {
@@ -355,6 +360,10 @@ func (s *Scheduler) Started(key core.ScaleSetKey, lane int, j core.Job) {
 }
 
 func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
+	if s.isDone(j) {
+		s.log.info("late started event ignored", "job", j.JobID, "runner", j.RunnerName)
+		return
+	}
 	rec := s.findJob(j)
 	if rec == nil {
 		rec = s.newJob(lk, j)
@@ -454,6 +463,9 @@ func (s *Scheduler) finish(rec *jobRec, j core.Job) {
 	}
 	s.forget(rec)
 	delete(s.ages, rec.ageKey)
+	if rec.job.JobID != "" {
+		s.done[rec.job.JobID] = now
+	}
 	runner := j.RunnerName
 	if rr != nil {
 		if runner == "" {
@@ -474,6 +486,12 @@ func (s *Scheduler) finish(rec *jobRec, j core.Job) {
 		s.effect(func(context.Context) { o.JobFinished(res) })
 	}
 	s.log.info("job finished", "job", rec.id, "runner", runner)
+}
+
+// isDone reports a job that already finished (late or redelivered events).
+func (s *Scheduler) isDone(j core.Job) bool {
+	_, ok := s.done[j.JobID]
+	return ok && j.JobID != ""
 }
 
 // releaseRunner frees the reservation now and schedules the reap.
@@ -721,6 +739,11 @@ func (s *Scheduler) Tick() {
 					s.shrink(rr)
 				}
 				s.log.info("unbound job dropped", "job", rec.id)
+			}
+		}
+		for id, at := range s.done {
+			if now.Sub(at) > s.o.AgeTTL {
+				delete(s.done, id)
 			}
 		}
 		for name, due := range s.reaps {
