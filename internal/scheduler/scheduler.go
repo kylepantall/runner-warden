@@ -1,0 +1,1180 @@
+package scheduler
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/kylepantall/runner-warden/internal/admission"
+	"github.com/kylepantall/runner-warden/internal/core"
+)
+
+const tickInterval = 10 * time.Second
+
+type phase int
+
+const (
+	pHeld phase = iota
+	pStarting
+	pBound
+)
+
+type jobRec struct {
+	id        string
+	job       core.Job
+	lane      LaneKey
+	phase     phase
+	cost      int64
+	pinned    int
+	age       time.Time
+	ageKey    string
+	seq       int
+	rr        *runnerRec
+	inQueue   bool
+	unboundAt time.Time // non-zero: GitHub un-assigned it (reassign churn)
+	notBefore time.Time // earliest next start attempt
+	startedAt time.Time
+	rerun     bool // runner lost mid-job; rerun once after completion
+	cancelled bool // ForceCancelRun already sent
+}
+
+type runnerRec struct {
+	tok       string // ledger key
+	seq       int
+	name      string // "" until StartRunner returns
+	lane      LaneKey
+	full      bool // reservation covers the job (else overhead only)
+	parked    bool // job bound/starting but hook must wait for full
+	job       *jobRec
+	createdAt time.Time
+	hookOK    bool
+	jobDone   bool // job-completed hook seen: a later exit is normal
+	released  bool
+}
+
+type laneRec struct {
+	key    LaneKey
+	queue  []*jobRec // unstarted jobs, oldest first; only the head may get a runner
+	capSet bool
+	cap    int
+	stats  LaneStats
+}
+
+type ageEntry struct {
+	t    time.Time
+	seen time.Time
+}
+
+type hookWaiter struct {
+	req      HookRequest
+	since    time.Time
+	deadline time.Time
+	ch       chan HookResponse
+	done     bool
+}
+
+type rerunReq struct {
+	owner, repo string
+	runID       int64
+	job         string
+	due         time.Time
+	tries       int
+}
+
+// Scheduler is the lane state machine. All methods are safe for concurrent
+// use; state changes happen under one mutex and side effects (runner calls)
+// run afterwards in goroutines tracked by Wait.
+type Scheduler struct {
+	o   Options
+	log logger
+
+	mu      sync.Mutex
+	base    context.Context
+	led     *admission.Ledger
+	lanes   map[LaneKey]*laneRec
+	jobs    map[string]*jobRec
+	byAge   map[string]*jobRec
+	ages    map[string]ageEntry
+	runners map[string]*runnerRec // by token
+	byName  map[string]*runnerRec
+	waiters []*hookWaiter
+	reaps   map[string]time.Time
+	reruns  []rerunReq
+	reran   map[string]bool
+	stats   map[LaneKey]LaneStats
+	seq     int
+	drain   bool
+	fx      []func(context.Context)
+	wg      sync.WaitGroup
+}
+
+// New builds a Scheduler.
+func New(o Options) *Scheduler {
+	o.defaults()
+	s := &Scheduler{
+		o:       o,
+		log:     logger{o.Log},
+		base:    context.Background(),
+		lanes:   map[LaneKey]*laneRec{},
+		jobs:    map[string]*jobRec{},
+		byAge:   map[string]*jobRec{},
+		ages:    map[string]ageEntry{},
+		runners: map[string]*runnerRec{},
+		byName:  map[string]*runnerRec{},
+		reaps:   map[string]time.Time{},
+		reran:   map[string]bool{},
+		stats:   map[LaneKey]LaneStats{},
+		led: admission.New(admission.Config{
+			Budget: o.Budget, External: o.ExternalReserved, Cores: o.Cores, ReservedCPUs: o.ReservedCPUs,
+		}),
+	}
+	s.locked(func() {
+		for _, lk := range o.Lanes {
+			s.lane(lk)
+		}
+	})
+	return s
+}
+
+// Run drives the periodic tick until ctx ends, then waits for in-flight
+// runner calls.
+func (s *Scheduler) Run(ctx context.Context) error {
+	s.mu.Lock()
+	s.base = ctx
+	s.mu.Unlock()
+	t := s.o.Clock.NewTicker(tickInterval)
+	defer t.Stop()
+	s.Tick()
+	for {
+		select {
+		case <-ctx.Done():
+			s.Wait()
+			return ctx.Err()
+		case <-t.C():
+			s.Tick()
+		}
+	}
+}
+
+// Wait blocks until every in-flight runner call has finished.
+func (s *Scheduler) Wait() { s.wg.Wait() }
+
+// locked runs f under the lock, then settles (grants, promotions, hook
+// verdicts, capacity) and launches the collected side effects.
+func (s *Scheduler) locked(f func()) {
+	s.mu.Lock()
+	f()
+	s.settle()
+	fx, ctx := s.fx, s.base
+	s.fx = nil
+	s.wg.Add(len(fx))
+	s.mu.Unlock()
+	for _, e := range fx {
+		go func() {
+			defer s.wg.Done()
+			e(ctx)
+		}()
+	}
+}
+
+func (s *Scheduler) effect(f func(context.Context)) { s.fx = append(s.fx, f) }
+
+func (s *Scheduler) now() time.Time { return s.o.Clock.Now() }
+
+func (s *Scheduler) lane(lk LaneKey) *laneRec {
+	l := s.lanes[lk]
+	if l == nil {
+		l = &laneRec{key: lk}
+		s.lanes[lk] = l
+	}
+	return l
+}
+
+func (s *Scheduler) overhead() admission.Request { return admission.Request{Mem: s.o.RunnerOverhead} }
+
+func (s *Scheduler) fullReq(r *jobRec) admission.Request {
+	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned}
+}
+
+func ageKeyOf(j core.Job) string {
+	if j.RunID == 0 {
+		return "id|" + j.JobID
+	}
+	return fmt.Sprintf("%d|%s", j.RunID, j.Name)
+}
+
+func isCanceled(res string) bool {
+	r := strings.ToLower(res)
+	return r == "canceled" || r == "cancelled"
+}
+
+func laneLess(a, b LaneKey) int {
+	return cmp.Or(
+		cmp.Compare(a.Target.Owner, b.Target.Owner),
+		cmp.Compare(a.Target.Repo, b.Target.Repo),
+		cmp.Compare(a.Target.RunnerGroup, b.Target.RunnerGroup),
+		cmp.Compare(a.OS, b.OS),
+		cmp.Compare(a.Lane, b.Lane),
+	)
+}
+
+func (s *Scheduler) sortedLanes() []*laneRec {
+	out := make([]*laneRec, 0, len(s.lanes))
+	for _, l := range s.lanes {
+		out = append(out, l)
+	}
+	slices.SortFunc(out, func(a, b *laneRec) int { return laneLess(a.key, b.key) })
+	return out
+}
+
+func (s *Scheduler) sortedRunners() []*runnerRec {
+	out := make([]*runnerRec, 0, len(s.runners))
+	for _, r := range s.runners {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b *runnerRec) int { return cmp.Compare(a.seq, b.seq) })
+	return out
+}
+
+// ---- queue helpers -------------------------------------------------------
+
+func (s *Scheduler) enqueue(r *jobRec) {
+	l := s.lane(r.lane)
+	if r.inQueue {
+		return
+	}
+	r.inQueue = true
+	i := slices.IndexFunc(l.queue, func(o *jobRec) bool {
+		return r.age.Before(o.age) || (r.age.Equal(o.age) && r.seq < o.seq)
+	})
+	if i < 0 {
+		l.queue = append(l.queue, r)
+	} else {
+		l.queue = slices.Insert(l.queue, i, r)
+	}
+}
+
+func (s *Scheduler) dequeue(r *jobRec) {
+	if !r.inQueue {
+		return
+	}
+	r.inQueue = false
+	l := s.lane(r.lane)
+	l.queue = slices.DeleteFunc(l.queue, func(o *jobRec) bool { return o == r })
+}
+
+// ---- job lookup ----------------------------------------------------------
+
+func (s *Scheduler) findJob(j core.Job) *jobRec {
+	if r := s.jobs[j.JobID]; r != nil {
+		return r
+	}
+	if j.RunID != 0 {
+		if r := s.byAge[ageKeyOf(j)]; r != nil {
+			delete(s.jobs, r.id) // GitHub re-issued the job under a new id
+			r.id = j.JobID
+			s.jobs[r.id] = r
+			return r
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) newJob(lk LaneKey, j core.Job) *jobRec {
+	now := s.now()
+	r := &jobRec{id: j.JobID, job: j, lane: lk, ageKey: ageKeyOf(j), age: now}
+	s.seq++
+	r.seq = s.seq
+	r.cost = s.o.DefaultJobMem
+	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
+		if rule.Mem > 0 {
+			r.cost = rule.Mem
+		}
+		r.pinned = rule.PinnedCores
+	}
+	if a, ok := s.ages[r.ageKey]; ok {
+		r.age = a.t
+	}
+	s.ages[r.ageKey] = ageEntry{t: r.age, seen: now}
+	s.jobs[r.id] = r
+	s.byAge[r.ageKey] = r
+	return r
+}
+
+func (s *Scheduler) forget(r *jobRec) {
+	s.dequeue(r)
+	delete(s.jobs, r.id)
+	if s.byAge[r.ageKey] == r {
+		delete(s.byAge, r.ageKey)
+	}
+}
+
+// ---- events --------------------------------------------------------------
+
+// Assigned handles a JobAssigned message for a lane.
+func (s *Scheduler) Assigned(key core.ScaleSetKey, lane int, j core.Job) {
+	s.locked(func() { s.onAssigned(LaneKey{key, lane}, j) })
+}
+
+// Reassigned handles a job the service assigned again (reassign churn); it is
+// idempotent with Assigned.
+func (s *Scheduler) Reassigned(key core.ScaleSetKey, lane int, j core.Job) {
+	s.locked(func() { s.onAssigned(LaneKey{key, lane}, j) })
+}
+
+func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
+	r := s.findJob(j)
+	if r != nil {
+		if r.phase == pBound {
+			return // stale: already started
+		}
+		r.job = j
+		if a, ok := s.ages[r.ageKey]; ok {
+			s.ages[r.ageKey] = ageEntry{t: a.t, seen: s.now()}
+		}
+		if !r.unboundAt.IsZero() {
+			r.unboundAt = time.Time{}
+			s.log.info("job reassigned", "job", r.id, "lane", lk.Lane)
+		}
+		r.lane = lk
+		s.enqueue(r) // no-op when still queued
+		return
+	}
+	r = s.newJob(lk, j)
+	s.enqueue(r)
+	s.log.info("job assigned", "job", r.id, "run", j.RunID, "cost", r.cost, "pinned", r.pinned, "lane", lk.Lane)
+}
+
+// Started handles a JobStarted message: the job is bound to j.RunnerName.
+func (s *Scheduler) Started(key core.ScaleSetKey, lane int, j core.Job) {
+	s.locked(func() { s.onStarted(LaneKey{key, lane}, j) })
+}
+
+func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
+	rec := s.findJob(j)
+	if rec == nil {
+		rec = s.newJob(lk, j)
+	}
+	rec.job = j
+	rec.lane = lk
+	name := j.RunnerName
+	var rr *runnerRec
+	if name != "" {
+		rr = s.byName[name]
+	}
+	if rr == nil && rec.rr != nil && rec.rr.name == "" { // Started beat StartRunner's return
+		rr = rec.rr
+		rr.name = name
+		s.byName[name] = rr
+	}
+	if rr != nil && rec.phase == pBound && rec.rr == rr {
+		return // duplicate
+	}
+	if rr == nil { // a runner we did not start (restart, adoption)
+		s.seq++
+		rr = &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: name, lane: lk, createdAt: s.now(), full: true}
+		s.led.Force(rr.tok, s.fullReq(rec))
+		s.runners[rr.tok] = rr
+		if name != "" {
+			s.byName[name] = rr
+		}
+	}
+	if old := rr.job; old != nil && old != rec { // the runner took another job than we planned
+		old.rr = nil
+		if old.phase == pStarting {
+			old.phase = pHeld
+		}
+	}
+	if o := rec.rr; o != nil && o != rr { // our planned runner for this job is now spare
+		o.job = nil
+		s.shrink(o)
+	}
+	s.dequeue(rec)
+	rec.rr, rr.job = rr, rec
+	rec.phase = pBound
+	rec.unboundAt = time.Time{}
+	rec.startedAt = s.now()
+	if rr.full {
+		_, _ = s.led.ForceResize(rr.tok, s.fullReq(rec))
+	} else {
+		rr.parked = true // waits in the hook until the ledger grants the rest
+	}
+	s.log.info("job started", "job", rec.id, "runner", name, "parked", rr.parked)
+}
+
+// shrink drops a runner's reservation to idle overhead.
+func (s *Scheduler) shrink(rr *runnerRec) {
+	_, _ = s.led.ForceResize(rr.tok, s.overhead())
+	rr.full, rr.parked, rr.hookOK = false, false, false
+}
+
+// Completed handles a JobCompleted message.
+func (s *Scheduler) Completed(key core.ScaleSetKey, lane int, j core.Job) {
+	s.locked(func() { s.onCompleted(LaneKey{key, lane}, j) })
+}
+
+func (s *Scheduler) onCompleted(lk LaneKey, j core.Job) {
+	rec := s.findJob(j)
+	if j.RunnerName == "" && isCanceled(j.Result) && (rec == nil || rec.phase != pBound) {
+		if rec == nil {
+			return
+		}
+		// Reassign churn (or a user cancel): keep age and any runner we already
+		// started; if no Assigned follows, Tick drops it.
+		if rec.unboundAt.IsZero() {
+			rec.unboundAt = s.now()
+		}
+		if rec.phase == pHeld {
+			s.dequeue(rec)
+		}
+		s.log.info("job unbound", "job", rec.id, "lane", lk.Lane)
+		return
+	}
+	if rec == nil {
+		if rr := s.byName[j.RunnerName]; rr != nil && j.RunnerName != "" {
+			s.releaseRunner(rr)
+		}
+		return
+	}
+	s.finish(rec, j)
+}
+
+func (s *Scheduler) finish(rec *jobRec, j core.Job) {
+	now := s.now()
+	rr := rec.rr
+	if rr == nil && j.RunnerName != "" {
+		rr = s.byName[j.RunnerName]
+		if rr != nil && rr.job != nil && rr.job != rec {
+			rr = nil
+		}
+	}
+	s.forget(rec)
+	delete(s.ages, rec.ageKey)
+	runner := j.RunnerName
+	if rr != nil {
+		if runner == "" {
+			runner = rr.name
+		}
+		s.releaseRunner(rr)
+	}
+	if rec.rerun && j.Result != "succeeded" {
+		k := fmt.Sprintf("%d|%s", rec.job.RunID, rec.job.Name)
+		if !s.reran[k] {
+			s.reran[k] = true
+			s.reruns = append(s.reruns, rerunReq{owner: rec.job.Owner, repo: rec.job.Repo, runID: rec.job.RunID, job: rec.job.Name, due: now.Add(s.o.RerunDelay)})
+		}
+	}
+	if o := s.o.Observer; o != nil {
+		res := JobResult{Job: rec.job, Lane: rec.lane, Runner: runner, Cost: rec.cost, Result: j.Result, Started: rec.startedAt, Finished: now}
+		res.Job.Result = j.Result
+		s.effect(func(context.Context) { o.JobFinished(res) })
+	}
+	s.log.info("job finished", "job", rec.id, "runner", runner)
+}
+
+// releaseRunner frees the reservation now and schedules the reap.
+func (s *Scheduler) releaseRunner(rr *runnerRec) {
+	name := rr.name
+	s.dropRunner(rr)
+	if name != "" {
+		s.reaps[name] = s.now().Add(s.o.ReapGrace)
+	}
+}
+
+func (s *Scheduler) dropRunner(rr *runnerRec) {
+	s.led.Release(rr.tok)
+	delete(s.runners, rr.tok)
+	if rr.name != "" && s.byName[rr.name] == rr {
+		delete(s.byName, rr.name)
+	}
+	rr.released = true
+	if rr.job != nil && rr.job.rr == rr {
+		rr.job.rr = nil
+	}
+	rr.job = nil
+}
+
+// Stats records the service's view of a lane (status display only).
+func (s *Scheduler) Stats(key core.ScaleSetKey, lane int, st LaneStats) {
+	s.locked(func() { s.lane(LaneKey{key, lane}).stats = st })
+}
+
+// RunnerDied reports a runner that is no longer alive. oom says the kernel
+// killed it for memory (no rerun then).
+func (s *Scheduler) RunnerDied(name string, oom bool) {
+	s.locked(func() {
+		rr := s.byName[name]
+		if rr == nil {
+			return
+		}
+		rec := rr.job
+		s.dropRunner(rr)
+		if rec == nil {
+			return
+		}
+		if rec.phase != pBound { // died before taking the job: plan a new runner
+			if rec.phase == pStarting {
+				rec.phase = pHeld
+				rec.notBefore = s.now().Add(s.o.StartRetry)
+			}
+			return
+		}
+		if rr.jobDone || rec.cancelled {
+			return // normal exit after the job finished
+		}
+		rec.cancelled = true
+		if !oom && s.o.RerunOnLoss {
+			rec.rerun = true
+		}
+		s.log.warn("runner died mid-job", "runner", name, "job", rec.id, "oom", oom)
+		if rec.job.RunID != 0 {
+			j := rec.job
+			s.effect(func(ctx context.Context) {
+				if err := s.o.Runners.ForceCancelRun(ctx, j.Owner, j.Repo, j.RunID); err != nil {
+					s.log.warn("force cancel failed", "run", j.RunID, "err", err.Error())
+				}
+			})
+		}
+	})
+}
+
+// Drain stops new work: capacity becomes started (no spare slot) and no new
+// runners are started; held jobs stay queued.
+func (s *Scheduler) Drain(on bool) {
+	s.locked(func() { s.drain = on })
+}
+
+// Draining reports the drain flag.
+func (s *Scheduler) Draining() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.drain
+}
+
+// SetExternalReserved changes memory reserved outside the ledger.
+func (s *Scheduler) SetExternalReserved(n int64) {
+	s.locked(func() { s.led.SetExternal(n) })
+}
+
+// Restore re-registers runners found at startup so their memory counts.
+func (s *Scheduler) Restore(rs []RestoredRunner) {
+	s.locked(func() {
+		for _, r := range rs {
+			if s.byName[r.Name] != nil {
+				continue
+			}
+			s.lane(r.Lane)
+			s.seq++
+			rr := &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: r.Name, lane: r.Lane, createdAt: r.Created}
+			if rr.createdAt.IsZero() {
+				rr.createdAt = s.now()
+			}
+			s.runners[rr.tok] = rr
+			s.byName[rr.name] = rr
+			if r.Job == nil {
+				s.led.Force(rr.tok, s.overhead())
+				continue
+			}
+			rec := s.findJob(*r.Job)
+			if rec == nil {
+				rec = s.newJob(r.Lane, *r.Job)
+			}
+			rec.rr, rr.job = rr, rec
+			rr.full = true
+			s.led.Force(rr.tok, s.fullReq(rec))
+			if r.Started {
+				rec.phase = pBound
+				rec.startedAt = rr.createdAt
+				rr.hookOK = true
+			} else {
+				rec.phase = pStarting
+				s.enqueue(rec)
+			}
+		}
+	})
+}
+
+// HookCompleted records the runner's job-completed hook: a later exit of that
+// runner is normal, not a loss. It reports whether the runner is known.
+func (s *Scheduler) HookCompleted(req HookRequest) bool {
+	known := false
+	s.locked(func() {
+		if rr := s.lookup(req); rr != nil {
+			rr.jobDone = true
+			known = true
+		}
+	})
+	return known
+}
+
+// ---- hook ----------------------------------------------------------------
+
+func (s *Scheduler) lookup(req HookRequest) *runnerRec {
+	if req.Runner != "" {
+		return s.byName[req.Runner]
+	}
+	for _, rr := range s.sortedRunners() {
+		if rr.job != nil && rr.job.job.RunID == req.RunID && req.RunID != 0 &&
+			strings.EqualFold(rr.job.job.Owner+"/"+rr.job.job.Repo, req.Repository) {
+			return rr
+		}
+	}
+	return nil
+}
+
+// Hook is the job-started hook: it returns once the runner's job holds its
+// full reservation, or with a deny verdict after AdmissionTimeout.
+func (s *Scheduler) Hook(ctx context.Context, req HookRequest) (HookResponse, error) {
+	var w *hookWaiter
+	s.locked(func() {
+		now := s.now()
+		w = &hookWaiter{req: req, since: now, deadline: now.Add(s.o.AdmissionTimeout), ch: make(chan HookResponse, 1)}
+		s.waiters = append(s.waiters, w)
+	})
+	select {
+	case r := <-w.ch:
+		return r, nil
+	case <-ctx.Done():
+		s.locked(func() {
+			w.done = true
+			s.waiters = slices.DeleteFunc(s.waiters, func(o *hookWaiter) bool { return o == w })
+		})
+		return HookResponse{}, ctx.Err()
+	}
+}
+
+func (s *Scheduler) pumpWaiters() {
+	now := s.now()
+	keep := s.waiters[:0]
+	for _, w := range s.waiters {
+		if w.done {
+			continue
+		}
+		resp, ok := HookResponse{Waited: now.Sub(w.since)}, true
+		rr := s.lookup(w.req)
+		switch {
+		case rr != nil && rr.full:
+			resp.Allow, resp.Reason = true, ReasonGranted
+			rr.hookOK = true
+		case !now.Before(w.deadline):
+			resp.Reason = ReasonAdmissionTimeout
+			s.log.warn("admission timeout", "runner", w.req.Runner, "run", w.req.RunID)
+		case rr == nil && now.Sub(w.since) >= s.o.UnknownRunnerGrace:
+			resp.Allow, resp.Reason = true, ReasonUnknownRunner
+			s.log.warn("hook from unknown runner", "runner", w.req.Runner, "run", w.req.RunID)
+		default:
+			ok = false
+		}
+		if !ok {
+			keep = append(keep, w)
+			continue
+		}
+		w.done = true
+		w.ch <- resp
+	}
+	clear(s.waiters[len(keep):])
+	s.waiters = keep
+}
+
+// ---- tick ----------------------------------------------------------------
+
+// Tick runs the time-driven work: VM sync, never-job recycle, unbound drop,
+// reaps, reruns, hook deadlines, age pruning, and a scheduling pass.
+func (s *Scheduler) Tick() {
+	var vms map[string]int64
+	if s.o.VMs != nil {
+		vms = s.o.VMs.VMsUp()
+	}
+	s.locked(func() {
+		now := s.now()
+		if s.o.VMs != nil {
+			s.syncVMs(vms)
+		}
+		for _, rr := range s.sortedRunners() {
+			if rr.job != nil && rr.job.phase == pBound {
+				continue
+			}
+			if now.Sub(rr.createdAt) < s.o.NeverJob {
+				continue
+			}
+			s.log.warn("runner never got a job", "runner", rr.name)
+			rec := rr.job
+			name := rr.name
+			s.dropRunner(rr)
+			if name != "" {
+				s.stop(name)
+			}
+			if rec != nil && rec.phase == pStarting {
+				rec.phase = pHeld
+				rec.notBefore = now.Add(s.o.StartRetry)
+			}
+		}
+		for _, rec := range s.sortedJobs() {
+			if !rec.unboundAt.IsZero() && now.Sub(rec.unboundAt) >= s.o.UnboundDrop {
+				s.forget(rec)
+				if rr := rec.rr; rr != nil {
+					rr.job, rec.rr = nil, nil
+					s.shrink(rr)
+				}
+				s.log.info("unbound job dropped", "job", rec.id)
+			}
+		}
+		for name, due := range s.reaps {
+			if !now.Before(due) {
+				delete(s.reaps, name)
+				s.stop(name)
+			}
+		}
+		due := s.reruns[:0]
+		var rest []rerunReq
+		for _, r := range s.reruns {
+			if now.Before(r.due) {
+				rest = append(rest, r)
+			} else {
+				due = append(due, r)
+			}
+		}
+		due = slices.Clone(due)
+		s.reruns = rest
+		for _, r := range due {
+			s.effect(func(ctx context.Context) {
+				if err := s.o.Runners.RerunJob(ctx, r.owner, r.repo, r.runID, r.job); err != nil {
+					s.log.warn("rerun failed", "run", r.runID, "err", err.Error())
+					if r.tries < 2 {
+						s.locked(func() {
+							r.tries++
+							r.due = s.now().Add(s.o.RerunDelay)
+							s.reruns = append(s.reruns, r)
+						})
+					}
+				}
+			})
+		}
+		for k, a := range s.ages {
+			if s.byAge[k] == nil && now.Sub(a.seen) > s.o.AgeTTL {
+				delete(s.ages, k)
+			}
+		}
+	})
+}
+
+func (s *Scheduler) sortedJobs() []*jobRec {
+	out := make([]*jobRec, 0, len(s.jobs))
+	for _, r := range s.jobs {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b *jobRec) int { return cmp.Compare(a.seq, b.seq) })
+	return out
+}
+
+func (s *Scheduler) stop(name string) {
+	s.effect(func(ctx context.Context) {
+		if err := s.o.Runners.StopRunner(ctx, name); err != nil {
+			s.log.warn("stop runner failed", "runner", name, "err", err.Error())
+		}
+	})
+}
+
+func (s *Scheduler) syncVMs(up map[string]int64) {
+	for name, mem := range up {
+		key := "vm:" + name
+		if r, ok := s.led.Get(key); !ok || r.Mem != mem {
+			s.led.Force(key, admission.Request{Mem: mem})
+		}
+	}
+	for _, key := range s.led.Keys() {
+		if name, ok := strings.CutPrefix(key, "vm:"); ok {
+			if _, still := up[name]; !still {
+				s.led.Release(key)
+			}
+		}
+	}
+}
+
+// ---- admission -----------------------------------------------------------
+
+type cand struct {
+	rec    *jobRec
+	w      admission.Waiter
+	parked bool
+}
+
+func (s *Scheduler) waiter(r *jobRec) admission.Waiter {
+	return admission.Waiter{ID: r.id, Group: r.lane.Target.String(), Cost: r.cost, Since: r.age, Seq: r.seq}
+}
+
+func (s *Scheduler) weight(group string) int {
+	for t, o := range s.o.Targets {
+		if t.String() == group && o.Weight > 0 {
+			return o.Weight
+		}
+	}
+	return 1
+}
+
+// heads returns each lane's head job that is held and may be granted.
+func (s *Scheduler) heads() []*jobRec {
+	var out []*jobRec
+	for _, l := range s.sortedLanes() {
+		if len(l.queue) > 0 && l.queue[0].phase == pHeld && l.queue[0].unboundAt.IsZero() {
+			out = append(out, l.queue[0])
+		}
+	}
+	return out
+}
+
+func (s *Scheduler) candidates() []cand {
+	now := s.now()
+	var out []cand
+	for _, r := range s.heads() {
+		if !now.Before(r.notBefore) {
+			out = append(out, cand{rec: r, w: s.waiter(r)})
+		}
+	}
+	for _, rr := range s.sortedRunners() {
+		if rr.parked && !rr.full && rr.job != nil {
+			out = append(out, cand{rec: rr.job, w: s.waiter(rr.job), parked: true})
+		}
+	}
+	return out
+}
+
+// oldestWaiter is the oldest job (held or parked) that could ever fit.
+func (s *Scheduler) oldestWaiter() *admission.Waiter {
+	var ws []admission.Waiter
+	for _, r := range s.heads() {
+		if s.led.FitsEver(s.fullReq(r)) {
+			ws = append(ws, s.waiter(r))
+		}
+	}
+	for _, rr := range s.sortedRunners() {
+		if rr.parked && !rr.full && rr.job != nil && s.led.FitsEver(s.fullReq(rr.job)) {
+			ws = append(ws, s.waiter(rr.job))
+		}
+	}
+	if i := admission.Oldest(ws); i >= 0 {
+		return &ws[i]
+	}
+	return nil
+}
+
+func (s *Scheduler) granted() map[string]int64 {
+	g := map[string]int64{}
+	for _, rr := range s.runners {
+		if r, ok := s.led.Get(rr.tok); ok {
+			g[rr.lane.Target.String()] += r.Mem
+		}
+	}
+	return g
+}
+
+func (s *Scheduler) policy() admission.Policy {
+	return admission.Policy{ReserveAfter: s.o.ReserveAfter, LightThreshold: s.o.LightThreshold}
+}
+
+// settle runs after every state change.
+func (s *Scheduler) settle() {
+	s.grantLoop()
+	s.promote()
+	s.pumpWaiters()
+	s.pushCapacity()
+}
+
+func (s *Scheduler) grantLoop() {
+	if s.drain {
+		return
+	}
+	for {
+		cs := s.candidates()
+		if len(cs) == 0 {
+			return
+		}
+		ws := make([]admission.Waiter, len(cs))
+		byID := make(map[string]cand, len(cs))
+		for i, c := range cs {
+			ws[i] = c.w
+			byID[c.w.ID] = c
+		}
+		admission.SortFair(ws, s.granted(), s.weight)
+		oldest := s.oldestWaiter()
+		progressed := false
+		for _, w := range ws {
+			if s.tryGrant(byID[w.ID], oldest) {
+				progressed = true
+				break
+			}
+		}
+		if !progressed {
+			return
+		}
+	}
+}
+
+func (s *Scheduler) liveCounts(t core.Target) (all, target int) {
+	for _, rr := range s.runners {
+		all++
+		if rr.lane.Target == t {
+			target++
+		}
+	}
+	return
+}
+
+func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
+	rec := c.rec
+	if oldest != nil && s.policy().Blocks(*oldest, c.w, s.now()) {
+		return false
+	}
+	if c.parked {
+		if _, err := s.led.Resize(rec.rr.tok, s.fullReq(rec)); err != nil {
+			return false
+		}
+		rec.rr.full, rec.rr.parked = true, false
+		s.log.info("parked job granted", "job", rec.id, "runner", rec.rr.name)
+		return true
+	}
+	if !s.canStartRunner(rec.lane.Target) {
+		return false
+	}
+	s.seq++
+	tok := fmt.Sprintf("r%d", s.seq)
+	res, err := s.led.Reserve(tok, s.fullReq(rec))
+	if err != nil {
+		return false
+	}
+	s.startRunner(rec, tok, s.seq, res, false)
+	return true
+}
+
+func (s *Scheduler) canStartRunner(t core.Target) bool {
+	all, target := s.liveCounts(t)
+	if s.o.MaxRunners > 0 && all >= s.o.MaxRunners {
+		return false
+	}
+	if m := s.o.Targets[t].Max; m > 0 && target >= m {
+		return false
+	}
+	return true
+}
+
+func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool) {
+	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now()}
+	s.runners[tok] = rr
+	rec.rr, rec.phase = rr, pStarting
+	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job}
+	lk := rec.lane
+	s.log.info("starting runner", "job", rec.id, "lane", lk.Lane, "mem", res.Mem, "parked", parked)
+	s.effect(func(ctx context.Context) {
+		name, err := s.o.Runners.StartRunner(ctx, lk, g)
+		s.locked(func() {
+			if rr.released {
+				if err == nil {
+					s.stop(name)
+				}
+				return
+			}
+			if err != nil {
+				s.log.warn("start runner failed", "job", rec.id, "err", err.Error())
+				s.dropRunner(rr)
+				if rec.rr == nil && rec.phase == pStarting {
+					rec.phase = pHeld
+					rec.notBefore = s.now().Add(s.o.StartRetry)
+				}
+				return
+			}
+			rr.name = name
+			s.byName[name] = rr
+		})
+	})
+}
+
+// promote starts one parked runner when a lane group is head-of-line blocked:
+// every lane of a scale set has a head held past HolGrace, or any head is held
+// past HoldMax.
+func (s *Scheduler) promote() {
+	if s.drain {
+		return
+	}
+	parked := 0
+	for _, rr := range s.runners {
+		if rr.parked && !rr.full {
+			parked++
+		}
+	}
+	if parked >= s.o.MaxParked {
+		return
+	}
+	now := s.now()
+	groups := map[core.ScaleSetKey][]*laneRec{}
+	var order []core.ScaleSetKey
+	for _, l := range s.sortedLanes() {
+		if _, ok := groups[l.key.ScaleSetKey]; !ok {
+			order = append(order, l.key.ScaleSetKey)
+		}
+		groups[l.key.ScaleSetKey] = append(groups[l.key.ScaleSetKey], l)
+	}
+	for _, k := range order {
+		var cs []*jobRec
+		all := true
+		for _, l := range groups[k] {
+			h := (*jobRec)(nil)
+			if len(l.queue) > 0 && l.queue[0].phase == pHeld && l.queue[0].unboundAt.IsZero() {
+				h = l.queue[0]
+			}
+			switch {
+			case h == nil:
+				all = false
+			case now.Sub(h.age) <= s.o.HolGrace:
+				all = false
+			default:
+				cs = append(cs, h)
+			}
+		}
+		if !all {
+			cs = cs[:0]
+			for _, l := range groups[k] {
+				if len(l.queue) > 0 {
+					if h := l.queue[0]; h.phase == pHeld && h.unboundAt.IsZero() && now.Sub(h.age) > s.o.HoldMax {
+						cs = append(cs, h)
+					}
+				}
+			}
+		}
+		if len(cs) == 0 {
+			continue
+		}
+		slices.SortFunc(cs, func(a, b *jobRec) int {
+			return cmp.Or(
+				-cmp.Compare(s.prefers(a), s.prefers(b)),
+				cmp.Compare(a.cost, b.cost),
+				a.age.Compare(b.age),
+				cmp.Compare(a.seq, b.seq),
+			)
+		})
+		for _, rec := range cs {
+			if !s.canStartRunner(rec.lane.Target) {
+				continue
+			}
+			s.seq++
+			tok := fmt.Sprintf("r%d", s.seq)
+			res, err := s.led.Reserve(tok, s.overhead())
+			if err != nil {
+				continue
+			}
+			s.log.info("promoting held job to parked runner", "job", rec.id, "lane", rec.lane.Lane)
+			s.startRunner(rec, tok, s.seq, res, true)
+			return
+		}
+	}
+}
+
+// prefers is 1 when the job's expected wait (time already waited) is at most
+// 25% of its timeout, which makes it cheap to park.
+func (s *Scheduler) prefers(r *jobRec) int {
+	if s.o.JobTimeout == nil {
+		return 0
+	}
+	if to := s.o.JobTimeout(r.job); to > 0 && s.now().Sub(r.age)*4 <= to {
+		return 1
+	}
+	return 0
+}
+
+func (s *Scheduler) pushCapacity() {
+	if s.o.Capacity == nil {
+		return
+	}
+	started := map[LaneKey]int{}
+	for _, r := range s.jobs {
+		if r.phase == pBound {
+			started[r.lane]++
+		}
+	}
+	for _, l := range s.sortedLanes() {
+		n := started[l.key]
+		if !s.drain {
+			n++
+		}
+		if !l.capSet || l.cap != n {
+			l.capSet, l.cap = true, n
+			s.o.Capacity.SetCapacity(l.key, n)
+		}
+	}
+}
+
+// ---- status --------------------------------------------------------------
+
+func (s *Scheduler) jobState(r *jobRec) JobState {
+	switch {
+	case !r.unboundAt.IsZero():
+		return StateUnbound
+	case r.phase == pHeld:
+		return StateHeld
+	case r.phase == pStarting:
+		return StateStarting
+	case r.rr != nil && r.rr.parked && !r.rr.full:
+		return StateParked
+	case r.rr != nil && r.rr.hookOK:
+		return StateRunning
+	}
+	return StateStarted
+}
+
+// Snapshot returns the current state for the status command.
+func (s *Scheduler) Snapshot() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	st := Status{Draining: s.drain, Ledger: s.led.Usage(), Runners: len(s.runners)}
+	for _, rr := range s.runners {
+		if rr.parked && !rr.full {
+			st.Parked++
+		}
+	}
+	byLane := map[LaneKey][]*jobRec{}
+	for _, r := range s.sortedJobs() {
+		byLane[r.lane] = append(byLane[r.lane], r)
+		if r.phase == pHeld && r.unboundAt.IsZero() {
+			st.Held++
+		}
+	}
+	for _, l := range s.sortedLanes() {
+		ls := LaneStatus{Lane: l.key, Name: laneName(l.key), Capacity: l.cap, Stats: l.stats}
+		for _, r := range byLane[l.key] {
+			if r.phase == pBound {
+				ls.Started++
+			}
+			js := JobStatus{
+				JobID: r.id, Owner: r.job.Owner, Repo: r.job.Repo, Workflow: admission.WorkflowFile(r.job.WorkflowRef),
+				Name: r.job.Name, RunID: r.job.RunID, State: s.jobState(r), Cost: r.cost, Pinned: r.pinned,
+				Age: now.Sub(r.age),
+			}
+			if r.rr != nil {
+				js.Runner = r.rr.name
+			}
+			ls.Jobs = append(ls.Jobs, js)
+		}
+		st.Lanes = append(st.Lanes, ls)
+	}
+	return st
+}
+
+func laneName(l LaneKey) string {
+	return fmt.Sprintf("%s/%s/l%d", l.Target, l.OS, l.Lane)
+}
+
+// ---- logging -------------------------------------------------------------
+
+type logger struct {
+	l interface {
+		Info(string, ...any)
+		Warn(string, ...any)
+	}
+}
+
+func (l logger) info(msg string, kv ...any) { l.l.Info(msg, kv...) }
+func (l logger) warn(msg string, kv ...any) { l.l.Warn(msg, kv...) }
