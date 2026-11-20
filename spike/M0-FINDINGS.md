@@ -33,7 +33,7 @@ Spike code: [`spike/m0`](m0/) — throwaway listener on `actions/scaleset` v0.5.
 | E3 | Pick a non-head job via `AcquireJobs` | ❌ Impossible: `JobAvailable` is never delivered |
 | E4 | Raise capacity live | ✅ Next job assigned FIFO, effective at the next poll (≤ 50 s) |
 | E5 | Runners started one by one | ✅ Each runner receives the oldest assigned-unstarted job (strict FIFO) |
-| E6 | Assigned job with no runner | ✅ Waiting in the queue does **not** count toward `timeout-minutes` (1-min-timeout job waited ≈4 min, passed). ⚠️ Every 5 min: `JobCompleted{canceled, runner ""}` + `JobAssigned` again (reassign churn); held ≥ 15 min with no failure |
+| E6 | Assigned job with no runner | ✅ Waiting in the queue does **not** count toward `timeout-minutes` (1-min-timeout job waited ≈4 min, passed). ⚠️ Every 5 min: `JobCompleted{canceled, runner ""}` + `JobAssigned` again (reassign churn), 3 times; then it stays assigned quietly. A job held **27 min** ran and passed when a runner finally started |
 | E7a | Runner killed 5 s after start | It was already bound: offline + busy, `DELETE` → 422. After 5 min GitHub rebinds; job then succeeds on another runner |
 | E7b | Runner killed mid-job | Job cancelled by GitHub after ≈14 min, not retried |
 | E8 | Two scale sets sharing one label | ✅ Allowed (extra label). Job routed to the set with capacity |
