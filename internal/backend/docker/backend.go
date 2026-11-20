@@ -30,7 +30,6 @@ import (
 type Config struct {
 	Instance string
 	HostID   string
-	Prefix   string // informational; every name already derives from it via naming
 	StateDir string // runner dirs and proxy sockets live in <StateDir>/runners
 	Image    string // default runner image
 	// DockerSocket is the real Docker socket (default /var/run/docker.sock).
@@ -40,10 +39,11 @@ type Config struct {
 	TmpfsSize    int64  // /tmp size in bytes; 0 = no size cap
 	OOMScoreAdj  int
 
-	// HookBinary and HookSocket are host paths mounted read-only into every
-	// runner at the same path.
+	// HookBinary is mounted read-only into every runner at the same path.
+	// HookDir is a dedicated directory holding only hook.sock; it is mounted
+	// read-write at the same path so a recreated socket stays visible.
 	HookBinary string
-	HookSocket string
+	HookDir    string
 
 	// CacheBinds ("host:container[:opts]") and CacheEnv go to runner and jobs.
 	CacheBinds []string
@@ -105,8 +105,8 @@ func newBackend(cfg Config, api dockerAPI) (*Backend, error) {
 	switch {
 	case cfg.Instance == "" || cfg.StateDir == "" || cfg.Image == "" || cfg.Slice == "":
 		return nil, errors.New("docker backend: instance, state dir, image and slice are required")
-	case cfg.HookBinary == "" || cfg.HookSocket == "":
-		return nil, errors.New("docker backend: hook binary and hook socket are required")
+	case cfg.HookBinary == "" || cfg.HookDir == "":
+		return nil, errors.New("docker backend: hook binary and hook dir are required")
 	}
 	if cfg.DockerSocket == "" {
 		cfg.DockerSocket = "/var/run/docker.sock"

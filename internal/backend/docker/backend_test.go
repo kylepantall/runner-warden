@@ -120,10 +120,10 @@ func shortDir(t *testing.T) string {
 func testBackend(t *testing.T, api dockerAPI) *Backend {
 	t.Helper()
 	b, err := newBackend(Config{
-		Instance: "main", HostID: "h1", Prefix: "my-ci", StateDir: shortDir(t),
+		Instance: "main", HostID: "h1", StateDir: shortDir(t),
 		Image: "runner:img", DockerSocket: filepath.Join(shortDir(t), "docker.sock"),
 		Slice: "runner-warden-main.slice", RunnerUID: 1001, TmpfsSize: 1 << 30, OOMScoreAdj: 500,
-		HookBinary: "/usr/bin/rw", HookSocket: "/run/rw/main.sock",
+		HookBinary: "/usr/bin/rw", HookDir: "/run/rw/hook",
 		CacheBinds: []string{"/cache/go:/go/pkg"}, CacheEnv: map[string]string{"GOMODCACHE": "/go/pkg"},
 	}, api)
 	if err != nil {
@@ -170,7 +170,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 		"ACTIONS_RUNNER_INPUT_JITCONFIG":    "JIT",
 		"ACTIONS_RUNNER_HOOK_JOB_STARTED":   filepath.Join(dir, hookDir, "job-started.sh"),
 		"ACTIONS_RUNNER_HOOK_JOB_COMPLETED": filepath.Join(dir, hookDir, "job-completed.sh"),
-		"RUNNER_WARDEN_SOCKET":              "/run/rw/main.sock",
+		"RUNNER_WARDEN_SOCKET":              "/run/rw/hook/hook.sock",
 		"RUNNER_WARDEN_RUNNER":              spec.Name,
 		"FOO":                               "bar",
 		"GOMODCACHE":                        "/go/pkg",
@@ -186,7 +186,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 	}
 	for _, want := range []string{
 		sock + ":/var/run/docker.sock", dir + ":" + dir,
-		"/usr/bin/rw:/usr/bin/rw:ro", "/run/rw/main.sock:/run/rw/main.sock:ro",
+		"/usr/bin/rw:/usr/bin/rw:ro", "/run/rw/hook:/run/rw/hook",
 		"/data:/data:ro", "/cache/go:/go/pkg",
 	} {
 		if !binds[want] {

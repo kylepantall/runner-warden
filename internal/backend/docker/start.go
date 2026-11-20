@@ -91,14 +91,14 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	env["ACTIONS_RUNNER_INPUT_JITCONFIG"] = spec.JITConfig
 	env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = started
 	env["ACTIONS_RUNNER_HOOK_JOB_COMPLETED"] = completed
-	env["RUNNER_WARDEN_SOCKET"] = c.HookSocket
+	env["RUNNER_WARDEN_SOCKET"] = filepath.Join(c.HookDir, "hook.sock")
 	env["RUNNER_WARDEN_RUNNER"] = spec.Name
 
 	binds := []string{
 		bind(sock, "/var/run/docker.sock", false),
 		bind(dir, dir, false),
 		bind(c.HookBinary, c.HookBinary, true),
-		bind(c.HookSocket, c.HookSocket, true),
+		bind(c.HookDir, c.HookDir, false),
 	}
 	for _, m := range spec.Mounts {
 		binds = append(binds, bind(m.HostPath, m.ContainerPath, m.ReadOnly))

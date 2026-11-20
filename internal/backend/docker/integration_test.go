@@ -24,7 +24,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 	b, err := New(Config{
 		Instance: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
 		Slice: "runner-warden-rwtest.slice", RunnerUID: 1001, TmpfsSize: 64 << 20, OOMScoreAdj: 500,
-		HookBinary: hook, HookSocket: hook,
+		HookBinary: hook, HookDir: shortDir(t),
 	})
 	if err != nil {
 		t.Fatal(err)
