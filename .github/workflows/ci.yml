@@ -24,7 +24,7 @@ jobs:
         run: go test ./internal/backend/docker/... ./internal/dockerproxy/...
         env:
           RW_DOCKER_TESTS: "1"
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+      - run: ./scripts/govulncheck.sh
   lint:
     runs-on: ubuntu-latest
     steps:
