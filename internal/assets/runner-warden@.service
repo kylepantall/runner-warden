@@ -1,0 +1,33 @@
+[Unit]
+Description=runner-warden self-hosted runner manager (%i)
+Documentation=https://github.com/kylepantall/runner-warden
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/runner-warden daemon --instance %i
+# SIGTERM drains: no new jobs are taken, running jobs keep going in Docker
+# and are adopted again on the next start.
+KillMode=mixed
+TimeoutStopSec=60
+Restart=always
+RestartSec=5
+OOMScoreAdjust=-900
+LimitNOFILE=65536
+RuntimeDirectory=runner-warden
+RuntimeDirectoryPreserve=yes
+# Root is required for the Docker socket, the job slice and removing files
+# jobs leave behind. Keep the rest of the system read-only.
+ProtectSystem=full
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

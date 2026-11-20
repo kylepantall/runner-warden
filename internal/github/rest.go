@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v93/github"
 
@@ -181,6 +182,7 @@ type Run struct {
 	PRs        []int
 	Status     string
 	Conclusion string
+	CreatedAt  time.Time
 }
 
 // GetRun fetches a workflow run.
@@ -190,7 +192,7 @@ func (r *REST) GetRun(ctx context.Context, owner, repo string, runID int64) (Run
 		return Run{}, wrap("get run", resp, err)
 	}
 	out := Run{ID: w.GetID(), Event: w.GetEvent(), HeadBranch: w.GetHeadBranch(), HeadSHA: w.GetHeadSHA(),
-		Status: w.GetStatus(), Conclusion: w.GetConclusion()}
+		Status: w.GetStatus(), Conclusion: w.GetConclusion(), CreatedAt: w.GetCreatedAt().Time}
 	for _, p := range w.PullRequests {
 		out.PRs = append(out.PRs, p.GetNumber())
 	}
@@ -253,9 +255,10 @@ func (r *REST) DispatchWorkflow(ctx context.Context, owner, repo, file, ref stri
 
 // PRState is the lifecycle state of a pull request.
 type PRState struct {
-	Number int
-	Merged bool
-	Closed bool
+	Number   int
+	Merged   bool
+	Closed   bool
+	ClosedAt time.Time // merge or close time; zero while open
 }
 
 // GetPRState reports whether a PR is merged or closed.
@@ -264,7 +267,7 @@ func (r *REST) GetPRState(ctx context.Context, owner, repo string, number int) (
 	if err != nil {
 		return PRState{}, wrap("get pull request", resp, err)
 	}
-	return PRState{Number: number, Merged: p.GetMerged(), Closed: p.GetState() == "closed"}, nil
+	return PRState{Number: number, Merged: p.GetMerged(), Closed: p.GetState() == "closed", ClosedAt: p.GetClosedAt().Time}, nil
 }
 
 // BranchExists reports whether a branch exists.
@@ -307,6 +310,15 @@ func (r *REST) ListOrgRepos(ctx context.Context, org string) ([]Repo, error) {
 		}
 		opts.Page = resp.NextPage
 	}
+}
+
+// GetRepo returns repository metadata (visibility, default branch).
+func (r *REST) GetRepo(ctx context.Context, owner, repo string) (Repo, error) {
+	x, resp, err := r.c.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return Repo{}, wrap("get repo", resp, err)
+	}
+	return Repo{Owner: owner, Name: x.GetName(), DefaultBranch: x.GetDefaultBranch(), Archived: x.GetArchived(), Private: x.GetPrivate(), Fork: x.GetFork()}, nil
 }
 
 // DefaultBranch returns a repository's default branch.

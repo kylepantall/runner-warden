@@ -55,6 +55,12 @@ func ValidatePrefix(p string) error {
 // Label is the runs-on label (and scale-set name) for an OS.
 func Label(prefix string, os core.OS) string { return prefix + "-" + string(os) }
 
+// LaneName is the scale-set name of lane n (1-based) for an OS. Every lane
+// carries Label(prefix, os) as an extra label, so workflows only use that.
+func LaneName(prefix string, os core.OS, n int) string {
+	return fmt.Sprintf("%s-l%d", Label(prefix, os), n)
+}
+
 // RunnerName is <prefix>-<hostid>-<rand>, always within GitHub's limit.
 func RunnerName(prefix, hostID string) string {
 	b := make([]byte, randLen/2)
