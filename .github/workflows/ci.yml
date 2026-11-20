@@ -16,13 +16,15 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
       - run: go vet ./...
       - run: go test -race ./...
       - name: Docker integration tests
         run: go test ./internal/backend/docker/... ./internal/dockerproxy/...
         env:
           RW_DOCKER_TESTS: "1"
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +44,7 @@ jobs:
           go-version-file: go.mod
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
+          version: v2.20.3
           args: release --snapshot --clean --skip=sign,sbom
   codeql:
     runs-on: ubuntu-latest

@@ -199,7 +199,7 @@ func newFixture(t *testing.T, maxConc int, vms ...config.WindowsVM) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	if len(vms) == 0 {
-		vms = []config.WindowsVM{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+		vms = []config.WindowsVM{{Name: "a", Targets: []string{"*"}}, {Name: "b", Targets: []string{"*"}}, {Name: "c", Targets: []string{"*"}}}
 	}
 	for i := range vms {
 		v := &vms[i]

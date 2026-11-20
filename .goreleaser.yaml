@@ -1,8 +1,5 @@
 version: 2
 project_name: runner-warden
-before:
-  hooks:
-    - go mod tidy
 builds:
   - id: runner-warden
     main: ./cmd/runner-warden

@@ -126,7 +126,7 @@ type WindowsVM struct {
 	DiskSize   string   `toml:"disk_size"`
 	Version    string   `toml:"version"`  // dockurr VERSION, e.g. "11"
 	SSHPort    int      `toml:"ssh_port"` // bound to 127.0.0.1 only
-	Targets    []string `toml:"targets"`  // owner or owner/repo; empty = any Windows target
+	Targets    []string `toml:"targets"`  // owner or owner/repo; "*" = any (required: jobs share a persistent VM)
 }
 
 // Container is the Docker container name of a VM.
@@ -134,11 +134,8 @@ func (v WindowsVM) Container(instance string) string { return instance + "-win-"
 
 // Serves reports whether the VM may run jobs for a target.
 func (v WindowsVM) Serves(t core.Target) bool {
-	if len(v.Targets) == 0 {
-		return true
-	}
 	for _, s := range v.Targets {
-		if s == t.Owner || s == t.String() {
+		if s == "*" || s == t.Owner || s == t.String() {
 			return true
 		}
 	}
@@ -407,6 +404,9 @@ func (c *Config) Validate() error {
 			add("windows.vm %q: duplicate name or ssh_port", v.Name)
 		}
 		vmNames[v.Name], vmPorts[v.SSHPort] = true, true
+		if len(v.Targets) == 0 {
+			add("windows.vm %q: set targets (owners or owner/repo; [\"*\"] for any): jobs share this persistent VM", v.Name)
+		}
 	}
 	if !c.Linux.Enabled && !c.Windows.Enabled {
 		add("enable at least one of [linux] or [windows]")

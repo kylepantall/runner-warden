@@ -40,6 +40,21 @@ BASE="https://github.com/$REPO/releases/download/v$VERSION"
 echo "Downloading runner-warden $VERSION ($ARCH)"
 curl -fsSL -o "$TMP/$ARCHIVE" "$BASE/$ARCHIVE"
 curl -fsSL -o "$TMP/checksums.txt" "$BASE/checksums.txt"
+# Authenticity: checksums.txt is signed keylessly by the release workflow.
+if command -v cosign >/dev/null 2>&1; then
+  curl -fsSL -o "$TMP/checksums.txt.pem" "$BASE/checksums.txt.pem"
+  curl -fsSL -o "$TMP/checksums.txt.sig" "$BASE/checksums.txt.sig"
+  cosign verify-blob \
+    --certificate "$TMP/checksums.txt.pem" --signature "$TMP/checksums.txt.sig" \
+    --certificate-identity-regexp "^https://github.com/$REPO/\.github/workflows/release\.yml@refs/tags/v" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$TMP/checksums.txt" >/dev/null 2>&1 || fail "signature verification failed"
+  echo "Signature verified"
+elif [ "${RW_REQUIRE_SIGNATURE:-0}" = 1 ]; then
+  fail "cosign not installed and RW_REQUIRE_SIGNATURE=1"
+else
+  echo "warning: cosign not installed; checksum verified but signature not checked" >&2
+fi
 (cd "$TMP" && grep " $ARCHIVE\$" checksums.txt | sha256sum -c -) || fail "checksum mismatch"
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
