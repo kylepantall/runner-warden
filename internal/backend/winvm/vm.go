@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/go-connections/nat"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
 
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/naming"
@@ -100,8 +100,16 @@ func (p *Pool) containerSpec(v config.WindowsVM, storage, oem string, env []stri
 			},
 		},
 	}
+	// The spec hash detects config drift. The guest password is left out: it is
+	// fixed at install time and must not end up (even hashed) in a label.
+	var specEnv []string
+	for _, e := range cfg.Env {
+		if !strings.HasPrefix(e, "PASSWORD=") {
+			specEnv = append(specEnv, e)
+		}
+	}
 	h := sha256.New()
-	_ = json.NewEncoder(h).Encode([]any{cfg.Image, cfg.Env, hc.Binds, hc.PortBindings, hc.Resources.CgroupParent})
+	_ = json.NewEncoder(h).Encode([]any{cfg.Image, specEnv, hc.Binds, hc.PortBindings, hc.CgroupParent})
 	cfg.Labels[labelSpec] = hex.EncodeToString(h.Sum(nil))[:16]
 	return cfg, hc
 }
@@ -118,7 +126,7 @@ func (p *Pool) readPassword(vm string) string {
 func (p *Pool) createVM(ctx context.Context, v config.WindowsVM, storage, oem string, env []string) error {
 	cfg, hc := p.containerSpec(v, storage, oem, env)
 	for _, d := range []string{orDefault(storage, v.StorageDir), orDefault(oem, v.OEMDir)} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o755); err != nil { //nolint:gosec // VM state dirs are mounted into the container and must be traversable
 			return err
 		}
 	}
@@ -142,7 +150,7 @@ func (p *Pool) ensureContainer(ctx context.Context, v config.WindowsVM) error {
 	name := v.Container(p.cfg.Instance)
 	insp, err := p.api.ContainerInspect(ctx, name)
 	switch {
-	case client.IsErrNotFound(err):
+	case cerrdefs.IsNotFound(err):
 		return p.createVM(ctx, v, "", "", p.vmEnv(v, p.readPassword(v.Name)))
 	case err != nil:
 		return err
@@ -270,7 +278,7 @@ func (p *Pool) waitSSH(ctx context.Context, v config.WindowsVM, ex Exec, wait ti
 func (p *Pool) stopVM(ctx context.Context, v config.WindowsVM) error {
 	name := v.Container(p.cfg.Instance)
 	insp, err := p.api.ContainerInspect(ctx, name)
-	if client.IsErrNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		p.markDown(v.Name)
 		return nil
 	}

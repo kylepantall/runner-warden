@@ -74,7 +74,7 @@ func encodePS(script string) string {
 	u := utf16.Encode([]rune(script))
 	b := make([]byte, 0, len(u)*2)
 	for _, c := range u {
-		b = append(b, byte(c), byte(c>>8))
+		b = append(b, byte(c&0xff), byte((c>>8)&0xff))
 	}
 	return base64.StdEncoding.EncodeToString(b)
 }
@@ -172,7 +172,7 @@ func (x *sshExec) exec(ctx context.Context, cmd, stdin string) (string, string, 
 	if err != nil {
 		return "", "", -1, err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	sess, err := client.NewSession()
 	if err != nil {
 		return "", "", -1, err
@@ -218,7 +218,7 @@ func tofuCallback(path string) ssh.HostKeyCallback {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600) //nolint:gosec // key path comes from root-owned config
 		if err != nil {
 			return err
 		}
@@ -232,7 +232,7 @@ func tofuCallback(path string) ssh.HostKeyCallback {
 		if err == nil || !errors.As(err, &ke) || len(ke.Want) > 0 {
 			return err // trusted, or a changed key: refuse
 		}
-		af, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		af, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // known_hosts-style path from root-owned config
 		if err != nil {
 			return err
 		}
@@ -245,14 +245,14 @@ func tofuCallback(path string) ssh.HostKeyCallback {
 // EnsureKey loads the ed25519 key at path, generating it (0600, plus a .pub
 // file) when missing. It returns the signer and the authorized_keys line.
 func EnsureKey(path string) (ssh.Signer, string, error) {
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // known_hosts-style path from root-owned config
 		s, err := ssh.ParsePrivateKey(b)
 		if err != nil {
 			return nil, "", fmt.Errorf("parse ssh key: %w", err)
 		}
 		line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey())))
 		if _, err := os.Stat(path + ".pub"); err != nil {
-			_ = os.WriteFile(path+".pub", []byte(line+"\n"), 0o644)
+			_ = os.WriteFile(path+".pub", []byte(line+"\n"), 0o644) //nolint:gosec // public key, world-readable by design
 		}
 		return s, line, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -277,7 +277,7 @@ func EnsureKey(path string) (ssh.Signer, string, error) {
 		return nil, "", err
 	}
 	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey())))
-	if err := os.WriteFile(path+".pub", []byte(line+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path+".pub", []byte(line+"\n"), 0o644); err != nil { //nolint:gosec // public key, world-readable by design
 		return nil, "", err
 	}
 	return s, line, nil

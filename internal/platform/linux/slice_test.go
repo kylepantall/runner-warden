@@ -25,7 +25,7 @@ func TestEnsureSliceIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(root, "etc/systemd/system", name)
-	b, err := os.ReadFile(file)
+	b, err := os.ReadFile(file) //nolint:gosec // test path under a temp root
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +87,12 @@ func TestDockerDefaultCgroupParent(t *testing.T) {
 		t.Fatalf("missing file: %q %v", v, err)
 	}
 	dir := filepath.Join(root, "etc/docker")
-	_ = os.MkdirAll(dir, 0o755)
-	_ = os.WriteFile(filepath.Join(dir, "daemon.json"), []byte(`{"cgroup-parent":"x.slice","log-driver":"json-file"}`), 0o644)
+	_ = os.MkdirAll(dir, 0o750)
+	_ = os.WriteFile(filepath.Join(dir, "daemon.json"), []byte(`{"cgroup-parent":"x.slice","log-driver":"json-file"}`), 0o600)
 	if v, err := h.DockerDefaultCgroupParent(); err != nil || v != "x.slice" {
 		t.Fatalf("got %q %v", v, err)
 	}
-	_ = os.WriteFile(filepath.Join(dir, "daemon.json"), []byte(`{bad`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "daemon.json"), []byte(`{bad`), 0o600)
 	if _, err := h.DockerDefaultCgroupParent(); err == nil {
 		t.Fatal("expected parse error")
 	}

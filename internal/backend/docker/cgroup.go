@@ -3,6 +3,7 @@ package docker
 import (
 	"bufio"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,22 +81,30 @@ func readCgroup(dir string) (s cgroupSample, ok bool) {
 		return s, false
 	}
 	s.cpuSeconds = float64(cpu["usage_usec"]) / 1e6
-	s.memCurrent = int64(cur)
+	s.memCurrent = clampInt64(cur)
 	if v, err := readUint(filepath.Join(dir, "memory.peak")); err == nil {
-		s.memPeak = int64(v)
+		s.memPeak = clampInt64(v)
 	}
 	if m, err := readKV(filepath.Join(dir, "memory.stat")); err == nil {
-		s.anon = int64(m["anon"])
+		s.anon = clampInt64(m["anon"])
 	}
 	if m, err := readKV(filepath.Join(dir, "memory.events")); err == nil {
-		s.oomKills = int(m["oom_kill"])
+		s.oomKills = int(min(m["oom_kill"], math.MaxInt32))
 	}
 	s.ioBytes = readIOBytes(filepath.Join(dir, "io.stat"))
 	return s, true
 }
 
+// clampInt64 converts a kernel counter without wrapping on overflow.
+func clampInt64(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
+}
+
 func readUint(path string) (uint64, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // cgroup file path built from the runner cgroup dir
 	if err != nil {
 		return 0, err
 	}
@@ -104,7 +113,7 @@ func readUint(path string) (uint64, error) {
 
 // readKV parses "key value" lines.
 func readKV(path string) (map[string]uint64, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // cgroup file path built from the runner cgroup dir
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +135,7 @@ func readKV(path string) (map[string]uint64, error) {
 // readIOBytes sums rbytes and wbytes over every device in io.stat
 // ("8:0 rbytes=1 wbytes=2 rios=..."). Missing file counts as zero.
 func readIOBytes(path string) int64 {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // cgroup file path built from the runner cgroup dir
 	if err != nil {
 		return 0
 	}

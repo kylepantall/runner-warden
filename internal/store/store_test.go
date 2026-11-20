@@ -15,7 +15,7 @@ func open(t *testing.T) (*Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s, p
 }
 
@@ -27,12 +27,12 @@ func TestMigrationsAndReopen(t *testing.T) {
 	if err := s.UpsertRunner(Runner{Name: "r1", Owner: "o", OS: "linux", State: RunnerIdle, Created: time.Unix(1, 0)}); err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 	s2, err := Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	if rs, _ := s2.ListRunners(); len(rs) != 1 {
 		t.Fatal("data should persist and migrations be idempotent")
 	}
@@ -43,7 +43,7 @@ func TestNewerSchemaRefused(t *testing.T) {
 	if _, err := s.db.Exec(`PRAGMA user_version = 99`); err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 	if _, err := Open(p); err == nil {
 		t.Fatal("must refuse newer schema")
 	}

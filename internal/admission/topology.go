@@ -58,7 +58,7 @@ func ReadTopology(root string) ([]Core, error) {
 	seen := map[int]bool{}
 	var cores []Core
 	for _, f := range files {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(f) //nolint:gosec // sysfs paths from our own glob of the topology root
 		if err != nil {
 			return nil, err
 		}

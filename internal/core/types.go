@@ -10,6 +10,7 @@ import (
 // OS is a runner operating system; each OS has its own label and scale set.
 type OS string
 
+// Supported operating systems.
 const (
 	Linux   OS = "linux"
 	Windows OS = "windows"

@@ -94,7 +94,7 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(cfg.Socket, 0o666); err != nil {
+	if err := os.Chmod(cfg.Socket, 0o666); err != nil { //nolint:gosec // the socket is deliberately world-connectable; access is gated per request
 		_ = ln.Close()
 		return nil, err
 	}
@@ -210,8 +210,13 @@ func (p *Proxy) Gate() Gate { return Gate{p} }
 // Gate is a Pause/Resume/InFlight view of a proxy.
 type Gate struct{ p *Proxy }
 
-func (g Gate) Pause()        { g.p.PausePulls() }
-func (g Gate) Resume()       { g.p.ResumePulls() }
+// Pause stops new image pulls.
+func (g Gate) Pause() { g.p.PausePulls() }
+
+// Resume allows image pulls again.
+func (g Gate) Resume() { g.p.ResumePulls() }
+
+// InFlight is the number of pulls in progress.
 func (g Gate) InFlight() int { return g.p.InFlightPulls() }
 
 func (p *Proxy) beginPull(ctx context.Context) bool {

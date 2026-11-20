@@ -124,20 +124,20 @@ func New(o Options) (*Daemon, error) {
 	case errors.Is(err, store.ErrNoMeta):
 		meta = store.Meta{HostID: naming.NewHostID(), Prefix: c.Prefix}
 		if err := st.SetMeta(meta); err != nil {
-			st.Close()
+			_ = st.Close()
 			return nil, err
 		}
 	case err != nil:
-		st.Close()
+		_ = st.Close()
 		return nil, err
 	case meta.Prefix != c.Prefix:
-		st.Close()
+		_ = st.Close()
 		return nil, fmt.Errorf("config prefix %q differs from the recorded prefix %q; use `runner-warden prefix set`", c.Prefix, meta.Prefix)
 	}
-	_ = os.WriteFile(HostIDFile(c.StateDir), []byte(meta.HostID), 0o644)
+	_ = os.WriteFile(HostIDFile(c.StateDir), []byte(meta.HostID), 0o644) //nolint:gosec // host id is not secret; readable by the runner hooks
 	rest, err := gh.NewREST(o.Token)
 	if err != nil {
-		st.Close()
+		_ = st.Close()
 		return nil, err
 	}
 	d := &Daemon{
@@ -155,7 +155,7 @@ func New(o Options) (*Daemon, error) {
 	}
 	d.backends, d.win, err = o.MakeBackends(meta.HostID)
 	if err != nil {
-		st.Close()
+		_ = st.Close()
 		return nil, fmt.Errorf("backends: %w", err)
 	}
 	lanes := c.Limits.Lanes
@@ -518,12 +518,9 @@ func (d *Daemon) JobFinished(r scheduler.JobResult) {
 	if !r.Started.IsZero() {
 		dur = r.Finished.Sub(r.Started)
 	}
-	var peak int64
-	d.mu.Lock()
-	d.mu.Unlock()
 	if err := d.store.AddJob(store.JobRecord{
 		Owner: r.Job.Owner, Repo: r.Job.Repo, Workflow: admission.WorkflowFile(r.Job.WorkflowRef), Job: r.Job.Name,
-		Cost: r.Cost, PeakMem: peak, Duration: dur, Result: r.Result, Finished: r.Finished,
+		Cost: r.Cost, Duration: dur, Result: r.Result, Finished: r.Finished,
 	}); err != nil {
 		d.log.Warn("record job failed", "error", err.Error())
 	}

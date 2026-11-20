@@ -53,8 +53,8 @@ func TestWritePlanTempIsPrivateAndUnique(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := writePlanTemp(map[string]int{"x": 1})
-	defer os.Remove(a)
-	defer os.Remove(b)
+	defer func() { _ = os.Remove(a) }()
+	defer func() { _ = os.Remove(b) }()
 	fi, err := os.Stat(a)
 	if err != nil || fi.Mode().Perm() != 0o600 || a == b {
 		t.Fatal(fi, err, a, b)

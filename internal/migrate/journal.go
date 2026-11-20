@@ -46,7 +46,7 @@ func OpenJournal(path string, now func() time.Time) (*Journal, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("journal dir: %w", err)
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // journal path under the root-owned state dir
 	if os.IsNotExist(err) {
 		return j, nil
 	}

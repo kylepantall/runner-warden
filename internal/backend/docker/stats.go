@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 
 	"github.com/kylepantall/runner-warden/internal/core"
 	"github.com/kylepantall/runner-warden/internal/naming"
@@ -52,7 +52,7 @@ func (b *Backend) Stats(ctx context.Context, h core.Handle) (core.Usage, error) 
 		switch {
 		case err == nil:
 			u.Alive = insp.State != nil && insp.State.Running
-		case !client.IsErrNotFound(err):
+		case !cerrdefs.IsNotFound(err):
 			return u, err
 		}
 	}
@@ -144,13 +144,13 @@ func (b *Backend) apiSample(ctx context.Context, id string) (cgroupSample, bool)
 	}
 	s := cgroupSample{
 		cpuSeconds: float64(st.CPUStats.CPUUsage.TotalUsage) / 1e9,
-		memCurrent: int64(st.MemoryStats.Usage),
-		memPeak:    int64(st.MemoryStats.MaxUsage),
-		anon:       int64(st.MemoryStats.Stats["anon"]),
+		memCurrent: clampInt64(st.MemoryStats.Usage),
+		memPeak:    clampInt64(st.MemoryStats.MaxUsage),
+		anon:       clampInt64(st.MemoryStats.Stats["anon"]),
 	}
 	for _, e := range st.BlkioStats.IoServiceBytesRecursive {
 		if e.Op == "read" || e.Op == "write" || e.Op == "Read" || e.Op == "Write" {
-			s.ioBytes += int64(e.Value)
+			s.ioBytes += clampInt64(e.Value)
 		}
 	}
 	return s, true

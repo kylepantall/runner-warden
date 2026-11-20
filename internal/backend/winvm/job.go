@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -158,11 +159,11 @@ func (p *Pool) sampleVM(ctx context.Context, v config.WindowsVM) (vmSample, bool
 		return s, false
 	}
 	s.cpu = float64(st.CPUStats.CPUUsage.TotalUsage) / 1e9
-	s.mem = int64(st.MemoryStats.Usage)
-	s.peak = int64(st.MemoryStats.MaxUsage)
+	s.mem = clampInt64(st.MemoryStats.Usage)
+	s.peak = clampInt64(st.MemoryStats.MaxUsage)
 	for _, e := range st.BlkioStats.IoServiceBytesRecursive {
 		if strings.EqualFold(e.Op, "read") || strings.EqualFold(e.Op, "write") {
-			s.io += int64(e.Value)
+			s.io += clampInt64(e.Value)
 		}
 	}
 	return s, true
@@ -191,7 +192,7 @@ func (p *Pool) Stats(ctx context.Context, h core.Handle) (core.Usage, error) {
 	switch {
 	case err == nil:
 		u.Alive = insp.State != nil && insp.State.Running
-	case !client.IsErrNotFound(err):
+	case !cerrdefs.IsNotFound(err):
 		return u, err
 	}
 	if s, ok := p.sampleVM(ctx, v); ok {
@@ -288,4 +289,9 @@ func (p *Pool) Cleanup(ctx context.Context, runnerName string) error {
 	}
 	p.dropRunner(runnerName)
 	return nil
+}
+
+// clampInt64 converts a counter without wrapping on overflow.
+func clampInt64(v uint64) int64 {
+	return int64(min(v, math.MaxInt64))
 }

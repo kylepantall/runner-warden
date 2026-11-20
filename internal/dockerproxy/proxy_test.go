@@ -281,7 +281,7 @@ func TestPullGate(t *testing.T) {
 	started := make(chan struct{}, 4)
 	var mu sync.Mutex
 	reached := 0
-	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		reached++
 		mu.Unlock()
@@ -353,7 +353,7 @@ func TestCloseReleasesPausedPulls(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	_ = p.Close()
 	select {
-	case <-errc:
+	case <-errc: //nolint:errcheck // result unused; only that the client unblocks
 	case <-time.After(3 * time.Second):
 		t.Fatal("client stuck after Close")
 	}
@@ -361,7 +361,7 @@ func TestCloseReleasesPausedPulls(t *testing.T) {
 
 func TestDeniedEndpoints(t *testing.T) {
 	hit := make(chan string, 8)
-	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit <- r.URL.Path })
+	up := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { hit <- r.URL.Path })
 	p := newProxy(t, startUpstream(t, up), nil)
 	for _, path := range []string{
 		"/swarm/init", "/v1.45/swarm/join", "/services/create", "/v1.43/services/x/update",
@@ -383,7 +383,7 @@ func TestDeniedEndpoints(t *testing.T) {
 
 func TestBuildLabelsCannotSetOurKeys(t *testing.T) {
 	got := make(chan url.Values, 1)
-	up := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.URL.Query() })
+	up := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got <- r.URL.Query() })
 	p := newProxy(t, startUpstream(t, up), nil)
 	forged, _ := json.Marshal(map[string]string{
 		naming.MetaRole: "runner", strings.ToUpper(naming.MetaRunner): "x", "keep": "me",

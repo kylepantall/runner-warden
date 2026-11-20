@@ -183,7 +183,7 @@ func TestRenameAtRefusesOverwrite(t *testing.T) {
 	if err := renameAt(fd, "a", fd, "b"); !errors.Is(err, fs.ErrExist) {
 		t.Fatal("want ErrExist, got", err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(d, "b")); string(b) != "2" {
+	if b, _ := os.ReadFile(filepath.Join(d, "b")); string(b) != "2" { //nolint:gosec // test path under a temp dir
 		t.Fatal("destination clobbered")
 	}
 }
@@ -300,7 +300,7 @@ func TestRollbackRefusesSymlinkedDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	victim := filepath.Join(e.root, "etc/profile.d")
-	if err := os.MkdirAll(victim, 0o755); err != nil {
+	if err := os.MkdirAll(victim, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(victim, dir); err != nil {
@@ -322,7 +322,7 @@ func TestRollbackRefusesSwappedInode(t *testing.T) {
 	if err := os.Rename(dir, dir+".old"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.r.Rollback(context.Background(), filepath.Join(m.Session, "manifest.json")); err == nil {

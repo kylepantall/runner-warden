@@ -14,9 +14,10 @@ import (
 const (
 	// MaxGitHubName is GitHub's limit for runner and scale-set names (M0).
 	MaxGitHubName = 64
-	MaxPrefix     = 32
-	hostIDLen     = 8
-	randLen       = 8
+	// MaxPrefix is the longest allowed instance prefix.
+	MaxPrefix = 32
+	hostIDLen = 8
+	randLen   = 8
 )
 
 var prefixRE = regexp.MustCompile(`^[a-z][a-z0-9-]*[a-z0-9]$`)
@@ -78,7 +79,7 @@ func ValidRunnerName(prefix, hostID, name string) bool {
 		return false
 	}
 	for _, c := range name[len(head):] {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}

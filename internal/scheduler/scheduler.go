@@ -1529,25 +1529,25 @@ func (s *Scheduler) dropPhantom(p *jobRec) {
 
 // mergePhantom lets a late real JobAssigned replace a placeholder in its lane,
 // taking over the placeholder's runner and age so nothing starts twice.
-func (s *Scheduler) mergePhantom(real *jobRec) {
+func (s *Scheduler) mergePhantom(incoming *jobRec) {
 	var ph *jobRec
 	for _, r := range s.sortedJobs() {
-		if r.phantom && r.lane == real.lane && r.phase != pBound && (ph == nil || (ph.rr == nil && r.rr != nil)) {
+		if r.phantom && r.lane == incoming.lane && r.phase != pBound && (ph == nil || (ph.rr == nil && r.rr != nil)) {
 			ph = r
 		}
 	}
 	if ph == nil {
 		return
 	}
-	if ph.age.Before(real.age) {
-		real.age = ph.age
+	if ph.age.Before(incoming.age) {
+		incoming.age = ph.age
 	}
 	if rr := ph.rr; rr != nil {
 		ph.rr = nil
-		rr.job, real.rr = real, rr
-		real.phase = pStarting
+		rr.job, incoming.rr = incoming, rr
+		incoming.phase = pStarting
 		if rr.full {
-			_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, real))
+			_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, incoming))
 		}
 	}
 	s.forget(ph)

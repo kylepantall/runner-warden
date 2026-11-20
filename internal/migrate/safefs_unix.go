@@ -67,7 +67,7 @@ func openChain(root, logical string) (int, error) {
 	}
 	for _, c := range comps {
 		next, err := unix.Openat(fd, c, dirFlags, 0)
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		if err != nil {
 			return -1, err
 		}
@@ -83,7 +83,7 @@ func fstatDir(fd int) (dirInfo, error) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return dirInfo{}, err
 	}
-	return dirInfo{Dev: uint64(st.Dev), Ino: uint64(st.Ino), UID: st.Uid}, nil
+	return dirInfo{Dev: uint64(st.Dev), Ino: st.Ino, UID: st.Uid}, nil //nolint:gosec,unconvert // st.Dev is int32 on darwin and an opaque id; never negative
 }
 
 // statChain returns the identity of the directory at logical, refusing any
@@ -106,14 +106,14 @@ func statRegularAt(dirfd int, name string) (uid uint32, err error) {
 	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return 0, err
 	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFREG {
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFREG { //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
 		return 0, errUnsafePath
 	}
 	return st.Uid, nil
 }
 
-// readFileAt reads a regular file in dirfd with no-follow, capped at max bytes.
-func readFileAt(dirfd int, name string, max int64) ([]byte, error) {
+// readFileAt reads a regular file in dirfd with no-follow, capped at limit bytes.
+func readFileAt(dirfd int, name string, limit int64) ([]byte, error) {
 	if !plainName(name) {
 		return nil, errUnsafePath
 	}
@@ -123,7 +123,7 @@ func readFileAt(dirfd int, name string, max int64) ([]byte, error) {
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, max))
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 func existsAt(dirfd int, name string) (bool, error) {
@@ -180,8 +180,8 @@ func copyAt(srcfd int, src string, dstfd int, dst string) error {
 	if err := unix.Fstatat(srcfd, src, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return err
 	}
-	perm := uint32(st.Mode) & 0o7777
-	switch uint32(st.Mode) & unix.S_IFMT {
+	perm := uint32(st.Mode) & 0o7777 //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
+	switch uint32(st.Mode) & unix.S_IFMT { //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
 	case unix.S_IFDIR:
 		if err := unix.Mkdirat(dstfd, dst, perm|0o700); err != nil {
 			return err
@@ -250,7 +250,7 @@ func removeAllAt(dirfd int, name string) error {
 		}
 		return err
 	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR { //nolint:unconvert // st.Mode is uint16 on darwin, uint32 on linux
 		return unix.Unlinkat(dirfd, name, 0)
 	}
 	fd, err := unix.Openat(dirfd, name, dirFlags, 0)

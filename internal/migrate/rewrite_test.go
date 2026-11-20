@@ -23,18 +23,18 @@ var testRules = Rules{
 
 func golden(t *testing.T, name string) (Result, []byte) {
 	t.Helper()
-	in, err := os.ReadFile(filepath.Join("testdata", name+".in.yml"))
+	in, err := os.ReadFile(filepath.Join("testdata", name+".in.yml")) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatal(err)
 	}
 	res := Analyze(in, testRules)
 	gp := filepath.Join("testdata", name+".golden.yml")
 	if *update {
-		if err := os.WriteFile(gp, res.Out, 0o644); err != nil {
+		if err := os.WriteFile(gp, res.Out, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	want, err := os.ReadFile(gp)
+	want, err := os.ReadFile(gp) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatal(err)
 	}

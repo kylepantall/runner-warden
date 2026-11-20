@@ -17,8 +17,10 @@ type Ticker interface {
 // RealClock uses the wall clock.
 type RealClock struct{}
 
+// Now returns the wall-clock time.
 func (RealClock) Now() time.Time { return time.Now() }
 
+// NewTicker returns a ticker on the real clock.
 func (RealClock) NewTicker(d time.Duration) Ticker { return realTicker{time.NewTicker(d)} }
 
 type realTicker struct{ *time.Ticker }

@@ -112,7 +112,7 @@ func daemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer d.Close()
+			defer func() { _ = d.Close() }()
 			return d.Run(cmd.Context())
 		},
 	}
@@ -131,7 +131,7 @@ func prepareCaches(cfg *config.Config) ([]string, map[string]string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("cache %q: dir_mode: %w", c.Name, err)
 		}
-		if err := os.MkdirAll(c.HostPath, 0o755); err != nil {
+		if err := os.MkdirAll(c.HostPath, 0o755); err != nil { //nolint:gosec // bind-mount source dirs must be traversable by the container user
 			return nil, nil, err
 		}
 		if err := os.Chown(c.HostPath, c.UID, c.GID); err != nil && !errors.Is(err, fs.ErrPermission) {

@@ -14,7 +14,7 @@ import (
 
 func writeCg(t *testing.T, dir string, cpuUsec, cur, peak, anon, oom int, io string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	files := map[string]string{
@@ -26,7 +26,7 @@ func writeCg(t *testing.T, dir string, cpuUsec, cur, peak, anon, oom int, io str
 		"io.stat":        io,
 	}
 	for n, c := range files {
-		if err := os.WriteFile(filepath.Join(dir, n), []byte(c), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(c), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -45,7 +45,7 @@ func TestExpandSlice(t *testing.T) {
 
 func TestReadIOBytes(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "io.stat")
-	_ = os.WriteFile(p, []byte("8:0 rbytes=100 wbytes=50 rios=3 wios=1\n259:0 rbytes=1 wbytes=2 dbytes=999\n"), 0o644)
+	_ = os.WriteFile(p, []byte("8:0 rbytes=100 wbytes=50 rios=3 wios=1\n259:0 rbytes=1 wbytes=2 dbytes=999\n"), 0o600)
 	if got := readIOBytes(p); got != 153 {
 		t.Fatalf("%d", got)
 	}
@@ -60,10 +60,10 @@ func TestStatsSumsContainersAndStaysMonotonic(t *testing.T) {
 	api.conts = []container.Summary{{ID: "job1"}}
 
 	diag := filepath.Join(b.runnerDir(testRunner), "_diag")
-	_ = os.MkdirAll(filepath.Join(diag, "pages"), 0o755)
-	_ = os.WriteFile(filepath.Join(diag, "pages", "step_1.log"), make([]byte, 1234), 0o644)
+	_ = os.MkdirAll(filepath.Join(diag, "pages"), 0o750)
+	_ = os.WriteFile(filepath.Join(diag, "pages", "step_1.log"), make([]byte, 1234), 0o600)
 	// Keep-alive noise in the runner's own logs must not count as job output.
-	_ = os.WriteFile(filepath.Join(diag, "Worker_1.log"), make([]byte, 999), 0o644)
+	_ = os.WriteFile(filepath.Join(diag, "Worker_1.log"), make([]byte, 999), 0o600)
 
 	h := core.Handle{RunnerName: testRunner, BackendID: "run1"}
 	u, err := b.Stats(context.Background(), h)

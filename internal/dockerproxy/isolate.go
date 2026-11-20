@@ -203,11 +203,11 @@ func (p *Proxy) execContainer(ctx context.Context, id string) (string, error) {
 func (p *Proxy) upstreamGet(ctx context.Context, pth string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+pth, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+pth, nil) //nolint:gosec // local docker socket upstream, path built by the proxy
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := p.up.Do(req)
+	resp, err := p.up.Do(req) //nolint:gosec // upstream is the local docker socket; the path is built by the proxy
 	if err != nil {
 		return nil, 0, err
 	}

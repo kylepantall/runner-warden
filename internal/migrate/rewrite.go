@@ -228,7 +228,7 @@ type analyzer struct {
 	untouched []Untouched
 	done      map[int]bool // span starts already edited
 
-	job_ string
+	jobName string
 }
 
 func (a *analyzer) apply() []byte {
@@ -257,7 +257,7 @@ func mapGet(m *yaml.Node, key string) *yaml.Node {
 }
 
 func (a *analyzer) skip(n *yaml.Node, r Reason, text, v string) {
-	a.skips = append(a.skips, Skip{Job: a.job_, Line: n.Line, Column: n.Column, Reason: r, Text: text, Var: v})
+	a.skips = append(a.skips, Skip{Job: a.jobName, Line: n.Line, Column: n.Column, Reason: r, Text: text, Var: v})
 }
 
 func (a *analyzer) job(name string, j *yaml.Node) {
@@ -265,7 +265,7 @@ func (a *analyzer) job(name string, j *yaml.Node) {
 	if ro == nil {
 		return
 	}
-	a.job_ = name
+	a.jobName = name
 	a.runsOn(j, ro)
 }
 
@@ -348,7 +348,7 @@ func (a *analyzer) record(n *yaml.Node, st, end int, form Form, os core.OS, newT
 	a.done[st] = true
 	a.edits = append(a.edits, edit{st, end, newText})
 	a.changes = append(a.changes, Change{
-		Job: a.job_, Line: n.Line, Column: n.Column, Form: form, OS: os,
+		Job: a.jobName, Line: n.Line, Column: n.Column, Form: form, OS: os,
 		Old: string(a.src.b[st:end]), New: newText,
 	})
 }
@@ -381,7 +381,7 @@ func (a *analyzer) runsOn(j, n *yaml.Node) {
 func (a *analyzer) scalarLabel(n *yaml.Node, labels []string, form Form) {
 	ours, os, foreign := a.classify(labels)
 	if !ours {
-		a.untouched = append(a.untouched, Untouched{Job: a.job_, Line: n.Line, Text: n.Value})
+		a.untouched = append(a.untouched, Untouched{Job: a.jobName, Line: n.Line, Text: n.Value})
 		return
 	}
 	if foreign {
@@ -429,7 +429,7 @@ func (a *analyzer) sequence(n *yaml.Node) {
 	ours, os, foreign := a.classify(labels)
 	first := n.Content[0]
 	if !ours {
-		a.untouched = append(a.untouched, Untouched{Job: a.job_, Line: first.Line, Text: strings.Join(labels, ", ")})
+		a.untouched = append(a.untouched, Untouched{Job: a.jobName, Line: first.Line, Text: strings.Join(labels, ", ")})
 		return
 	}
 	if foreign {
@@ -594,7 +594,7 @@ func (a *analyzer) expression(j, n *yaml.Node) {
 			}
 		}
 		if onlyVars {
-			a.untouched = append(a.untouched, Untouched{Job: a.job_, Line: n.Line, Text: n.Value})
+			a.untouched = append(a.untouched, Untouched{Job: a.jobName, Line: n.Line, Text: n.Value})
 		}
 	}
 }
@@ -634,7 +634,7 @@ func (a *analyzer) expressionLiteral(n *yaml.Node, l literal) {
 	}
 	a.done[l.start] = true
 	a.edits = append(a.edits, edit{l.start, l.end, text})
-	a.changes = append(a.changes, Change{Job: a.job_, Line: line, Column: col, Form: form, OS: os,
+	a.changes = append(a.changes, Change{Job: a.jobName, Line: line, Column: col, Form: form, OS: os,
 		Old: string(a.src.b[l.start:l.end]), New: text})
 }
 

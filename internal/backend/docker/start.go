@@ -29,7 +29,7 @@ const hookDir = "rw-hooks"
 // `docker inspect`), is read into the environment and deleted first thing.
 const entrypoint = `set -e; J="$1/.jit"; ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat "$J"); rm -f "$J"; export ACTIONS_RUNNER_INPUT_JITCONFIG; cp -RP /home/runner/. "$1"; cd "$1"; exec ./run.sh`
 
-func mkdirAll(p string) error { return os.MkdirAll(p, 0o755) }
+func mkdirAll(p string) error { return os.MkdirAll(p, 0o755) } //nolint:gosec // runner dirs must be traversable by the runner uid
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
@@ -58,8 +58,6 @@ func sortedEnv(m map[string]string) []string {
 	}
 	return out
 }
-
-func envKey(e string) string { k, _, _ := strings.Cut(e, "="); return k }
 
 // parseDevice accepts "/dev/kvm" or "host:container[:perms]".
 func parseDevice(d string) container.DeviceMapping {
@@ -156,7 +154,7 @@ func (b *Backend) prepareDir(dir string) error {
 	if err := os.Chown(dir, b.runnerOwner(), -1); err != nil {
 		// Not root (tests, rootless): make the dir usable by any uid instead.
 		b.log.Warn("runner dir chown failed, widening mode", "dir", dir, "error", err.Error())
-		if err := os.Chmod(dir, 0o777); err != nil {
+		if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // fallback when not root: the runner uid must be able to write
 			return err
 		}
 	}
@@ -165,7 +163,7 @@ func (b *Backend) prepareDir(dir string) error {
 		return err
 	}
 	for event, file := range map[string]string{"job-started": "job-started.sh", "job-completed": "job-completed.sh"} {
-		if err := os.WriteFile(filepath.Join(hd, file), []byte(hookWrapper(b.cfg.HookBinary, event)), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(hd, file), []byte(hookWrapper(b.cfg.HookBinary, event)), 0o755); err != nil { //nolint:gosec // hook wrappers must be executable by the runner
 			return err
 		}
 	}
@@ -181,7 +179,7 @@ func (b *Backend) writeJIT(dir, jit string) error {
 	}
 	if err := os.Chown(p, b.runnerOwner(), -1); err != nil {
 		// Not root (tests, rootless): the dir is world-usable then, so is this.
-		return os.Chmod(p, 0o444)
+		return os.Chmod(p, 0o444) //nolint:gosec // read-only for everyone is the intent when chown is unavailable
 	}
 	return nil
 }

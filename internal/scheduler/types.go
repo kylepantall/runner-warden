@@ -225,6 +225,7 @@ type HookResponse struct {
 // JobState is a job's position in the lane state machine.
 type JobState string
 
+// Job lifecycle states.
 const (
 	StateHeld     JobState = "held"     // assigned, waiting for a grant
 	StateStarting JobState = "starting" // runner requested, no Started yet

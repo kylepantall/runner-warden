@@ -45,7 +45,7 @@ func TestEnsureKey(t *testing.T) {
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("%v %v", st, err)
 	}
-	if b, _ := os.ReadFile(p + ".pub"); strings.TrimSpace(string(b)) != pub1 {
+	if b, _ := os.ReadFile(p + ".pub"); strings.TrimSpace(string(b)) != pub1 { //nolint:gosec // test path under a temp dir
 		t.Fatal("pub file")
 	}
 	s2, pub2, err := EnsureKey(p)

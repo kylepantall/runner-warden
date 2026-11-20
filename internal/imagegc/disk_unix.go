@@ -14,5 +14,5 @@ func diskUsedPercent(path string) (int, error) {
 		return 0, nil
 	}
 	free := st.Bavail
-	return int((total - free) * 100 / total), nil
+	return int(min((total-free)*100/total, 100)), nil
 }

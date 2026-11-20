@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -227,8 +228,8 @@ func (b *Backend) Stop(ctx context.Context, h core.Handle, grace time.Duration) 
 	var errs []error
 	for _, id := range ids {
 		err := b.api.ContainerStop(ctx, id, container.StopOptions{Timeout: &secs})
-		if err != nil && !client.IsErrNotFound(err) {
-			if kerr := b.api.ContainerKill(ctx, id, "KILL"); kerr != nil && !client.IsErrNotFound(kerr) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
+			if kerr := b.api.ContainerKill(ctx, id, "KILL"); kerr != nil && !cerrdefs.IsNotFound(kerr) {
 				errs = append(errs, kerr)
 			}
 		}

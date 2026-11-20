@@ -32,7 +32,7 @@ type setupOpts struct {
 	prefix, budget, sweep, runnerGroup string
 	orgs, repos, legacy, windowsLabels []string
 	tokenStdin, yes, dryRun, retire    bool
-	updateVars, allowPublic, noWindows bool
+	updateVars, allowPublic            bool
 }
 
 func setupCmd() *cobra.Command {
@@ -340,7 +340,7 @@ func setupToken(ctx context.Context, cfg *config.Config, o setupOpts, in *bufio.
 	args := []string{"auth", "token"}
 	var c *exec.Cmd
 	if u := os.Getenv("SUDO_USER"); u != "" && os.Geteuid() == 0 {
-		c = exec.CommandContext(ctx, "sudo", append([]string{"-u", u, "-H", "gh"}, args...)...)
+		c = exec.CommandContext(ctx, "sudo", append([]string{"-u", u, "-H", "gh"}, args...)...) //nolint:gosec // fixed args; SUDO_USER is only honoured when already root
 	} else {
 		c = exec.CommandContext(ctx, "gh", args...)
 	}
@@ -376,8 +376,6 @@ func isOurRunnerName(name string) bool {
 	}
 	return len(parts[len(parts)-1]) == 8 && len(parts[len(parts)-2]) == 8
 }
-
-var defaultLabels = []string{"self-hosted", "linux", "windows", "macos", "x64", "arm64", "arm", "x86"}
 
 // learnLocalLabels fills rules from the eligible local runners.
 func learnLocalLabels(ctx context.Context, rules *migrate.Rules, rest *gh.REST, targets []core.Target, hostRoots []string) {
@@ -422,8 +420,6 @@ func learnLocalLabels(ctx context.Context, rules *migrate.Rules, rest *gh.REST, 
 		}
 	}
 }
-
-func isDefaultLabel(l string) bool { return slices.Contains(defaultLabels, strings.ToLower(l)) }
 
 func printPlan(w io.Writer, cfg *config.Config, p *migrate.Plan, o setupOpts) {
 	lanes := max(cfg.Limits.Lanes, 1)
@@ -470,14 +466,14 @@ func installService(ctx context.Context, inst string, cfgChanged bool) error {
 	unit := "/etc/systemd/system/runner-warden@.service"
 	unitChanged := false
 	if cur, err := os.ReadFile(unit); err != nil || !bytes.Equal(cur, assets.SystemdUnit) {
-		if err := os.WriteFile(unit, assets.SystemdUnit, 0o644); err != nil {
+		if err := os.WriteFile(unit, assets.SystemdUnit, 0o644); err != nil { //nolint:gosec // systemd units are world-readable by design
 			return err
 		}
 		unitChanged = true
 	}
 	for _, a := range serviceCommands(inst, unitChanged || cfgChanged) {
 		if out, err := exec.CommandContext(ctx, "systemctl", a...).CombinedOutput(); err != nil {
-			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(a, " "), err, out)
+			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(a, " "), err, out)
 		}
 	}
 	return nil
@@ -527,7 +523,7 @@ func defaultBudget() int64 {
 	var kb int64
 	for _, l := range strings.Split(string(b), "\n") {
 		if strings.HasPrefix(l, "MemTotal:") {
-			fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(l, "MemTotal:")), "%d", &kb)
+			_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(l, "MemTotal:")), "%d", &kb)
 		}
 	}
 	v := kb*1024*3/4 - 2*units.GiB
@@ -546,7 +542,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o640)
+	return os.WriteFile(path, b, 0o640) //nolint:gosec // group-readable config so the service group can read it
 }
 
 // writePlanTemp writes the plan to a fresh, exclusively created 0600 file in

@@ -64,17 +64,17 @@ func (r *RunnerHooks) Start(runner string) (string, error) {
 		return "", errors.New("hookapi: invalid runner name")
 	}
 	r.Stop(runner)
-	if err := os.MkdirAll(r.base, 0o755); err != nil {
+	if err := os.MkdirAll(r.base, 0o755); err != nil { //nolint:gosec // traversable base dir; per-runner dirs are 0700
 		return "", err
 	}
-	if err := os.Chmod(r.base, 0o711); err != nil {
+	if err := os.Chmod(r.base, 0o711); err != nil { //nolint:gosec // x-only for others so runners can reach their own 0700 dir
 		return "", err
 	}
 	dir := r.Dir(runner)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // owner-only dir needs the x bit
 		return "", err
 	}
 	sock := r.SocketPath(runner)

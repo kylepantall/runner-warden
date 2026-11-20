@@ -479,8 +479,8 @@ func (r *REST) CommitFiles(ctx context.Context, owner, repo, branch, message str
 			return "", false, gerr
 		}
 		entries = append(entries, &github.TreeEntry{
-			Path: github.Ptr(f.Path), Mode: github.Ptr("100644"), Type: github.Ptr("blob"),
-			Content: github.Ptr(string(f.Content)),
+			Path: new(f.Path), Mode: new("100644"), Type: new("blob"),
+			Content: new(string(f.Content)),
 		})
 	}
 	if len(entries) == 0 {
@@ -491,7 +491,7 @@ func (r *REST) CommitFiles(ctx context.Context, owner, repo, branch, message str
 		return "", false, wrap("create tree", resp, err)
 	}
 	nc, resp, err := r.c.Git.CreateCommit(ctx, owner, repo, github.Commit{
-		Message: github.Ptr(message), Tree: tree, Parents: []*github.Commit{{SHA: github.Ptr(tip)}},
+		Message: new(message), Tree: tree, Parents: []*github.Commit{{SHA: new(tip)}},
 	}, nil)
 	if err != nil {
 		return "", false, wrap("create commit", resp, err)
@@ -521,7 +521,7 @@ func (r *REST) OpenPR(ctx context.Context, owner, repo, head, base, title, body 
 		return PR{Number: prs[0].GetNumber(), URL: prs[0].GetHTMLURL()}, nil
 	}
 	p, resp, err := r.c.PullRequests.Create(ctx, owner, repo, github.CreatePullRequest{
-		Title: github.Ptr(title), Head: head, Base: base, Body: github.Ptr(body),
+		Title: new(title), Head: head, Base: base, Body: new(body),
 	})
 	if err != nil {
 		return PR{}, wrap("create pull request", resp, err)
@@ -565,9 +565,9 @@ func (r *REST) UpdateVariable(ctx context.Context, scope core.Target, name, valu
 	var resp *github.Response
 	var err error
 	if scope.IsOrg() {
-		resp, err = r.c.Actions.UpdateOrgVariable(ctx, scope.Owner, name, github.ActionsUpdateOrgVariableRequest{Value: github.Ptr(value)})
+		resp, err = r.c.Actions.UpdateOrgVariable(ctx, scope.Owner, name, github.ActionsUpdateOrgVariableRequest{Value: new(value)})
 	} else {
-		resp, err = r.c.Actions.UpdateRepoVariable(ctx, scope.Owner, scope.Repo, name, github.ActionsUpdateVariableRequest{Value: github.Ptr(value)})
+		resp, err = r.c.Actions.UpdateRepoVariable(ctx, scope.Owner, scope.Repo, name, github.ActionsUpdateVariableRequest{Value: new(value)})
 	}
 	return wrap("update variable", resp, err)
 }

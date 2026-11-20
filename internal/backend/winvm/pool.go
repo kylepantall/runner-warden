@@ -38,15 +38,25 @@ import (
 const EnvVM = "RUNNER_WARDEN_VM"
 
 var (
-	ErrNoVM         = errors.New("winvm: no idle VM available")
-	ErrUnknownVM    = errors.New("winvm: unknown VM")
-	ErrBusy         = errors.New("winvm: VM has a runner")
-	ErrLicenceCap   = errors.New("winvm: windows.max_concurrent reached")
-	ErrNotOwned     = errors.New("winvm: container is not owned by this instance")
-	ErrVMExited     = errors.New("winvm: VM container exited")
-	ErrSSHTimeout   = errors.New("winvm: guest ssh did not come up")
-	ErrNoRunnerVer  = errors.New("winvm: runner version unknown")
-	ErrBadRunner    = errors.New("winvm: invalid runner name")
+	// ErrNoVM means no idle VM can take the job.
+	ErrNoVM = errors.New("winvm: no idle VM available")
+	// ErrUnknownVM means the named VM is not in the pool.
+	ErrUnknownVM = errors.New("winvm: unknown VM")
+	// ErrBusy means the VM already has a runner.
+	ErrBusy = errors.New("winvm: VM has a runner")
+	// ErrLicenceCap means the Windows concurrency limit is reached.
+	ErrLicenceCap = errors.New("winvm: windows.max_concurrent reached")
+	// ErrNotOwned means the container belongs to another instance.
+	ErrNotOwned = errors.New("winvm: container is not owned by this instance")
+	// ErrVMExited means the VM container stopped.
+	ErrVMExited = errors.New("winvm: VM container exited")
+	// ErrSSHTimeout means the guest never accepted SSH.
+	ErrSSHTimeout = errors.New("winvm: guest ssh did not come up")
+	// ErrNoRunnerVer means the runner version could not be determined.
+	ErrNoRunnerVer = errors.New("winvm: runner version unknown")
+	// ErrBadRunner means the runner name failed validation.
+	ErrBadRunner = errors.New("winvm: invalid runner name")
+	// ErrForeignAlive means a foreign container is still running.
 	ErrForeignAlive = errors.New("winvm: foreign container is running")
 )
 
@@ -216,7 +226,7 @@ func (p *Pool) paths(runner string) jobPaths {
 	return jobPaths{Runner: runner, RunnerDir: p.cfg.Windows.RunnerDir, WorkRoot: p.cfg.Windows.WorkDir}
 }
 
-// Caps: FixedMemBytes is the largest VM; use MemFor for the exact value.
+// Caps reports the VM limits: FixedMemBytes is the largest VM; use MemFor for the exact value.
 func (p *Pool) Caps() core.Caps {
 	var mem int64
 	for _, v := range p.cfg.Windows.VMs {
@@ -252,7 +262,7 @@ func (p *Pool) VMFor(runner string) (string, bool) {
 // WorkFolder is the absolute guest work folder for the JIT config's
 // WorkFolder setting. The runner resolves it with Path.Combine(root, folder),
 // so an absolute path wins (unverified against the runner source).
-func (p *Pool) WorkFolder(vm, runner string) string { return p.paths(runner).WorkFolder() }
+func (p *Pool) WorkFolder(_, runner string) string { return p.paths(runner).WorkFolder() }
 
 func (p *Pool) busyLocked(vm string) bool {
 	if p.claimed[vm] {

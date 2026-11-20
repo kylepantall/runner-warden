@@ -64,14 +64,14 @@ func (h Host) EnsureSlice(name string, memMax, swapMax int64) error {
 
 	file := h.path(filepath.Join("/etc/systemd/system", name))
 	want := []byte(SliceUnit(memMax, swapMax))
-	have, err := os.ReadFile(file)
+	have, err := os.ReadFile(file) //nolint:gosec // systemd unit path under the host root
 	changed := err != nil || !bytes.Equal(have, want)
 	if changed {
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil { //nolint:gosec // systemd unit dir is world-readable by design
 			return err
 		}
 		tmp := file + ".tmp"
-		if err := os.WriteFile(tmp, want, 0o644); err != nil {
+		if err := os.WriteFile(tmp, want, 0o644); err != nil { //nolint:gosec // systemd unit files are world-readable by design
 			return err
 		}
 		if err := os.Rename(tmp, file); err != nil {

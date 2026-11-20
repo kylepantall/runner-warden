@@ -38,11 +38,11 @@ func TestPhantomStartsRunnerAfterGraceAndBindsRealJob(t *testing.T) {
 		t.Fatalf("free=%d", h.free())
 	}
 	g := h.run.starts[0]
-	real := h.job("a", "big")
-	real.RunnerName = "rn-" + g.Key
-	h.s.Started(l.ScaleSetKey, l.Lane, real)
+	realJob := h.job("a", "big")
+	realJob.RunnerName = "rn-" + g.Key
+	h.s.Started(l.ScaleSetKey, l.Lane, realJob)
 	h.wait()
-	if h.phantoms() != 0 || h.state(real.JobID) == "" {
+	if h.phantoms() != 0 || h.state(realJob.JobID) == "" {
 		t.Fatalf("phantom must give way to the real job, phantoms=%d", h.phantoms())
 	}
 	if h.free() != 6*gib { // resized to the real cost

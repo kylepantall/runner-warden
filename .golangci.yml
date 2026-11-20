@@ -7,9 +7,28 @@ linters:
     - revive
     - unconvert
   settings:
+    errcheck:
+      exclude-functions:
+        # Close/Rollback in defers and cleanup paths: nothing useful to do on failure.
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*net.Conn).Close
+        - (net.Conn).Close
+        - (*golang.org/x/crypto/ssh.Client).Close
+        - (*golang.org/x/crypto/ssh.Session).Close
+        # Console output to stdout/stderr/tabwriter.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*text/tabwriter.Writer).Flush
     gosec:
       excludes:
         - G204 # subprocesses are intentional (systemctl, ssh)
+        - G104 # unhandled errors are covered by errcheck (with its exclusions)
   exclusions:
     paths:
       - spike/

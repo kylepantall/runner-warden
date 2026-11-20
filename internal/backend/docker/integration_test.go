@@ -20,7 +20,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 		img = "ghcr.io/actions/actions-runner:latest"
 	}
 	hook := shortDir(t) + "/hook"
-	_ = os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o755)
+	_ = os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o755) //nolint:gosec // the hook must be executable
 	b, err := New(Config{
 		Instance: "rwtest", Prefix: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
 		Slice: "runner-warden-rwtest.slice", RunnerUID: 1001, TmpfsSize: 64 << 20, OOMScoreAdj: 500,

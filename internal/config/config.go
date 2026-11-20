@@ -23,6 +23,7 @@ const SchemaVersion = 1
 // Size is a byte count written as "22GiB", "512MiB", ...
 type Size int64
 
+// UnmarshalText parses a human size such as "8GiB".
 func (s *Size) UnmarshalText(b []byte) error {
 	v, err := units.RAMInBytes(string(b))
 	if err != nil {
@@ -32,11 +33,13 @@ func (s *Size) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// MarshalText renders the size in human form.
 func (s Size) MarshalText() ([]byte, error) { return []byte(units.BytesSize(float64(s))), nil }
 
 // Duration is a time.Duration written as "40m", "6h", ...
 type Duration time.Duration
 
+// UnmarshalText parses a Go duration string.
 func (d *Duration) UnmarshalText(b []byte) error {
 	v, err := time.ParseDuration(string(b))
 	if err != nil {
@@ -46,11 +49,13 @@ func (d *Duration) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// MarshalText renders the duration as a Go duration string.
 func (d Duration) MarshalText() ([]byte, error) { return []byte(time.Duration(d).String()), nil }
 
 // D returns the value as a time.Duration.
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
+// Config is the on-disk runner-warden configuration.
 type Config struct {
 	SchemaVersion int    `toml:"schema_version"`
 	Prefix        string `toml:"prefix"`
@@ -72,10 +77,12 @@ type Config struct {
 	Targets []Target `toml:"target"`
 }
 
+// GitHub holds credentials settings.
 type GitHub struct {
 	TokenFile string `toml:"token_file"`
 }
 
+// Limits bounds resource use across all jobs.
 type Limits struct {
 	MemoryBudget     Size     `toml:"memory_budget"`     // hard ceiling for all jobs (slice MemoryMax)
 	SwapMax          Size     `toml:"swap_max"`          // slice MemorySwapMax
@@ -93,6 +100,7 @@ type Limits struct {
 	ExternalReserved Size     `toml:"external_reserved"` // memory used outside the ledger
 }
 
+// Linux configures the Docker backend.
 type Linux struct {
 	Enabled      bool   `toml:"enabled"`
 	Image        string `toml:"image"`
@@ -105,6 +113,7 @@ type Linux struct {
 	AllowedBinds []string `toml:"allowed_binds"`
 }
 
+// Windows configures the Windows VM backend.
 type Windows struct {
 	Enabled       bool        `toml:"enabled"`
 	MaxConcurrent int         `toml:"max_concurrent"` // licences; required when enabled
@@ -145,6 +154,7 @@ func (v WindowsVM) Serves(t core.Target) bool {
 	return false
 }
 
+// Hang configures hung-job detection.
 type Hang struct {
 	Idle        Duration `toml:"idle"`
 	MaxDuration Duration `toml:"max_duration"`
@@ -153,12 +163,14 @@ type Hang struct {
 	RerunOnLoss bool     `toml:"rerun_on_runner_loss"`
 }
 
+// Stale configures cancelling stale runs.
 type Stale struct {
 	CancelClosedPRs     bool     `toml:"cancel_closed_prs"`
 	CancelDeletedBranch bool     `toml:"cancel_deleted_branches"`
 	Interval            Duration `toml:"interval"`
 }
 
+// ImageGC configures image garbage collection.
 type ImageGC struct {
 	HighWatermark int      `toml:"high_watermark_percent"`
 	Interval      Duration `toml:"interval"`
@@ -186,6 +198,7 @@ type Cost struct {
 	Devices     []string `toml:"devices"`
 }
 
+// Target is an org or repo that runners serve.
 type Target struct {
 	Org         string   `toml:"org"`
 	Repo        string   `toml:"repo"` // owner/name
@@ -253,12 +266,12 @@ func (c *Config) Save(file string) error {
 		return err
 	}
 	tmp := file + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640) //nolint:gosec // group-readable on purpose so the service group can read the config
 	if err != nil {
 		return err
 	}
 	if err := toml.NewEncoder(f).Encode(c); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

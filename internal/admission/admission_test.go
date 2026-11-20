@@ -163,10 +163,10 @@ func TestReadTopology(t *testing.T) {
 	root := t.TempDir()
 	write := func(cpu, siblings string) {
 		d := filepath.Join(root, "cpu"+cpu, "topology")
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(d, "thread_siblings_list"), []byte(siblings+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(d, "thread_siblings_list"), []byte(siblings+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,7 +175,7 @@ func TestReadTopology(t *testing.T) {
 	write("1", "1,5")
 	write("5", "1,5")
 	write("2", "2")
-	if err := os.MkdirAll(filepath.Join(root, "cpufreq"), 0o755); err != nil { // not a cpuN dir
+	if err := os.MkdirAll(filepath.Join(root, "cpufreq"), 0o750); err != nil { // not a cpuN dir
 		t.Fatal(err)
 	}
 	got, err := ReadTopology(root)

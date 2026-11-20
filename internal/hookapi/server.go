@@ -166,7 +166,7 @@ func Serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
 		if err := srv.Shutdown(sctx); err != nil {
 			_ = srv.Close()
 		}
-		<-errc
+		<-errc //nolint:errcheck // Serve result is irrelevant after shutdown
 		return nil
 	}
 }
@@ -178,7 +178,7 @@ func ListenControl(path, group string) (net.Listener, error) {
 	if group != "" {
 		mode = 0o660
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // socket dir must be traversable; the socket itself is mode-restricted
 		return nil, err
 	}
 	return listenUnix(path, mode, group)
@@ -192,7 +192,7 @@ func listenUnix(path string, mode os.FileMode, group string) (net.Listener, erro
 	if err != nil {
 		return nil, err
 	}
-	fail := func(err error) (net.Listener, error) { ln.Close(); os.Remove(path); return nil, err }
+	fail := func(err error) (net.Listener, error) { _ = ln.Close(); _ = os.Remove(path); return nil, err }
 	if group != "" {
 		g, err := user.LookupGroup(group)
 		if err != nil {

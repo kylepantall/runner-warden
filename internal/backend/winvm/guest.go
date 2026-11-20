@@ -2,6 +2,7 @@ package winvm
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -171,7 +172,7 @@ func parseGuestStats(out string) (guestStats, error) {
 		case "state":
 			g.State, seen = v, true
 		case "procs":
-			g.Procs = int(n)
+			g.Procs = int(max(0, min(n, math.MaxInt32)))
 		case "log":
 			g.Log = n
 		case "diag":

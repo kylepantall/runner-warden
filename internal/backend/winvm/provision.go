@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 )
 
 //go:embed embed/install.bat embed/install.ps1 embed/baseline.ps1
@@ -33,12 +33,13 @@ const (
 	userScriptTimeout = 60 * time.Minute
 )
 
+// ErrStorageNotEmpty means the storage dir already holds a VM disk.
 var ErrStorageNotEmpty = errors.New("winvm: storage already holds a VM disk; use adopt")
 
 // OEMFiles writes the first-logon files into dir: install.bat, install.ps1
 // and authorized_key.pub (the daemon's public key).
 func OEMFiles(dir, pubKey string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // OEM dir is mounted into the VM container and must be readable there
 		return err
 	}
 	files := map[string]string{
@@ -47,7 +48,7 @@ func OEMFiles(dir, pubKey string) error {
 		"authorized_key.pub": strings.TrimSpace(pubKey) + "\n",
 	}
 	for n, c := range files {
-		if err := os.WriteFile(filepath.Join(dir, n), []byte(c), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(c), 0o644); err != nil { //nolint:gosec // OEM files are mounted into the VM container and must be readable there
 			return err
 		}
 	}
@@ -264,7 +265,7 @@ func (p *Pool) Adopt(ctx context.Context, vm, fromContainer, passwordFile string
 			return res, err
 		}
 	}
-	pwb, err := os.ReadFile(passwordFile)
+	pwb, err := os.ReadFile(passwordFile) //nolint:gosec // password file path comes from root-owned config
 	if err != nil {
 		return res, err
 	}
@@ -292,10 +293,10 @@ func (p *Pool) Adopt(ctx context.Context, vm, fromContainer, passwordFile string
 	name := v.Container(p.cfg.Instance)
 	insp, err := p.api.ContainerInspect(ctx, name)
 	switch {
-	case client.IsErrNotFound(err):
+	case cerrdefs.IsNotFound(err):
 		err = p.createVM(ctx, v, f.StorageDir, oem, env)
 	case err == nil:
-		if err = ownedBy(insp, p.cfg); err == nil && !(insp.State != nil && insp.State.Running) {
+		if err = ownedBy(insp, p.cfg); err == nil && insp.State == nil || !insp.State.Running {
 			err = p.api.ContainerStart(ctx, insp.ID, container.StartOptions{})
 		}
 	}
@@ -312,8 +313,11 @@ func (p *Pool) Adopt(ctx context.Context, vm, fromContainer, passwordFile string
 	c, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	_, errOut, code, err := pex.Run(c, installKeyScript(pub))
 	cancel()
-	if err != nil || code != 0 {
-		return res, fmt.Errorf("install ssh key: %v %s", err, tail(errOut, 300))
+	if err != nil {
+		return res, fmt.Errorf("install ssh key: %w %s", err, tail(errOut, 300))
+	}
+	if code != 0 {
+		return res, fmt.Errorf("install ssh key: exit %d %s", code, tail(errOut, 300))
 	}
 	kex, err := p.execFor(v)
 	if err != nil {

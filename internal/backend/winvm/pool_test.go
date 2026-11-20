@@ -43,7 +43,6 @@ type fakeDocker struct {
 	stopped   []string
 	restarted []string
 	removed   []string
-	statsCPU  uint64
 	stopErr   error
 }
 
@@ -287,7 +286,7 @@ func TestEnsureUpCreatesThenStarts(t *testing.T) {
 	if _, has := l[naming.MetaRunner]; !has {
 		t.Fatal("runner label must exist (empty)")
 	}
-	if c.hc.Resources.CgroupParent != "runner-warden-main.slice" {
+	if c.hc.CgroupParent != "runner-warden-main.slice" {
 		t.Fatal("cgroup parent")
 	}
 	if len(c.hc.Binds) != 2 || !strings.HasSuffix(c.hc.Binds[0], ":/storage") || !strings.HasSuffix(c.hc.Binds[1], ":/oem") {
@@ -488,7 +487,7 @@ func TestStartCommands(t *testing.T) {
 
 func TestStartFailureCleansUp(t *testing.T) {
 	f := newFixture(t, 3)
-	f.ex.handler = func(s, in string) (string, string, int, error) {
+	f.ex.handler = func(s, _ string) (string, string, int, error) {
 		if strings.Contains(s, "Register-ScheduledTask") {
 			return "", "boom", 1, nil
 		}

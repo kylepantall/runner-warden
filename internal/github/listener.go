@@ -171,7 +171,7 @@ func (l *Listener) Run(ctx context.Context) error {
 }
 
 func jitter(d time.Duration) time.Duration {
-	return d - time.Duration(rand.Int64N(int64(d)/4+1))
+	return d - time.Duration(rand.Int64N(int64(d)/4+1)) //nolint:gosec // retry jitter, not security-sensitive
 }
 
 func (l *Listener) runSession(ctx context.Context) error {

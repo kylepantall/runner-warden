@@ -85,7 +85,7 @@ type Waiter struct {
 func Oldest(ws []Waiter) int {
 	best := -1
 	for i, w := range ws {
-		if best < 0 || older(w, ws[best]) {
+		if best < 0 || older(w, ws[best]) { //nolint:gosec // best >= 0 is checked by the short-circuit above
 			best = i
 		}
 	}

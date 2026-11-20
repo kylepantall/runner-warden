@@ -22,7 +22,7 @@ func shortDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(d) })
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
 	return d
 }
 
@@ -79,7 +79,7 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r.hookSock, r.ctlSock = hp, filepath.Join(dir, "ctl.sock")
-	go Serve(ctx, NewControlServer(h), cl)
+	go func() { _ = Serve(ctx, NewControlServer(h), cl) }()
 	return r
 }
 
@@ -191,7 +191,7 @@ func TestRunHookRetriesUntilDaemonAppears(t *testing.T) {
 		return scheduler.HookResponse{Allow: false, Reason: "no"}, nil
 	}}
 	n := 0
-	o := HookOptions{Sleep: func(ctx context.Context, d time.Duration) {
+	o := HookOptions{Sleep: func(ctx context.Context, _ time.Duration) {
 		n++
 		if n == 2 {
 			ln, err := net.Listen("unix", sock)
@@ -199,7 +199,7 @@ func TestRunHookRetriesUntilDaemonAppears(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			go Serve(ctx, NewHookServer(h), ln)
+			go func() { _ = Serve(ctx, NewHookServer(h), ln) }()
 		}
 	}}
 	var errb bytes.Buffer

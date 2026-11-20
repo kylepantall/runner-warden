@@ -74,7 +74,7 @@ var lookupUID = func(name string) (uint32, bool) {
 // ownerAllowed: the runner dir must belong to root (trustedUID) or to the
 // user the unit runs as.
 func ownerAllowed(uid uint32, unitUser string, trustedUID int) bool {
-	if uid == uint32(trustedUID) {
+	if int64(uid) == int64(trustedUID) {
 		return true
 	}
 	if unitUser == "" {
@@ -227,7 +227,7 @@ func readUnit(root, unit string, trustedUID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if uid != uint32(trustedUID) {
+	if int64(uid) != int64(trustedUID) {
 		return "", errUnsafePath
 	}
 	b, err := readFileAt(fd, unit, maxSmallFile)
@@ -263,7 +263,7 @@ func readSmall(p string) ([]byte, error) {
 	if !isRegular(p) {
 		return nil, errUnsafePath
 	}
-	f, err := os.Open(p)
+	f, err := os.Open(p) //nolint:gosec // opened relative to a validated runner dir
 	if err != nil {
 		return nil, err
 	}

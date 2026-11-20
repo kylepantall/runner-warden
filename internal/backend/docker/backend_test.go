@@ -292,7 +292,7 @@ func TestInvalidRunnerNamesRefused(t *testing.T) {
 	api := &fakeAPI{}
 	b := testBackend(t, api)
 	victim := filepath.Join(b.runnersDir(), "victim")
-	if err := os.MkdirAll(victim, 0o755); err != nil {
+	if err := os.MkdirAll(victim, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range []string{"", "..", "../victim", "victim", "my-ci-h1-ZZZZZZZZ"} {
@@ -347,7 +347,7 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 	if err := b.startProxy(testRunner, b.proxySock(testRunner)); err != nil {
 		t.Fatal(err)
 	}
-	defer b.Cleanup(context.Background(), testRunner)
+	defer func() { _ = b.Cleanup(context.Background(), testRunner) }()
 	g.Resume() // must resume the proxy created while paused
 	if b.paused != 0 || g.InFlight() != 0 {
 		t.Fatal("gate state")
@@ -357,13 +357,13 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 func TestAdoptRestartsProxyOnSameSocket(t *testing.T) {
 	api := &fakeAPI{inspectBinds: []string{"/data:/data:ro", "/usr/bin/rw:/usr/bin/rw:ro"}}
 	b := testBackend(t, api)
-	if err := os.MkdirAll(b.runnerDir(testRunner), 0o755); err != nil {
+	if err := os.MkdirAll(b.runnerDir(testRunner), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Adopt(context.Background(), core.Handle{RunnerName: testRunner, BackendID: "cid"}); err != nil {
 		t.Fatal(err)
 	}
-	defer b.Cleanup(context.Background(), testRunner)
+	defer func() { _ = b.Cleanup(context.Background(), testRunner) }()
 	if _, err := os.Stat(b.proxySock(testRunner)); err != nil {
 		t.Fatalf("proxy socket: %v", err)
 	}

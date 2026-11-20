@@ -19,7 +19,7 @@ func TestOEMFilesEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := func(n string) string {
-		b, err := os.ReadFile(filepath.Join(dir, n))
+		b, err := os.ReadFile(filepath.Join(dir, n)) //nolint:gosec // test path under a temp dir
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -103,10 +103,10 @@ func TestProvisionFlow(t *testing.T) {
 		last = idx
 	}
 	// Existing disk: refuse, use adopt.
-	if err := os.MkdirAll(v.StorageDir, 0o755); err != nil {
+	if err := os.MkdirAll(v.StorageDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(v.StorageDir, "data.img"), nil, 0o644)
+	_ = os.WriteFile(filepath.Join(v.StorageDir, "data.img"), nil, 0o600)
 	if err := f.pool.Provision(ctx, "a", ""); !errors.Is(err, ErrStorageNotEmpty) {
 		t.Fatalf("got %v", err)
 	}

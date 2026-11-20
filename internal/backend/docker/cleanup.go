@@ -7,10 +7,10 @@ import (
 	"os"
 	"syscall"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/client"
 )
 
 // Cleanup removes everything a runner and its jobs created. Idempotent and safe
@@ -30,7 +30,7 @@ func (b *Backend) Cleanup(ctx context.Context, runner string) error {
 
 	var errs []error
 	keep := func(err error) {
-		if err != nil && !client.IsErrNotFound(err) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			errs = append(errs, err)
 		}
 	}

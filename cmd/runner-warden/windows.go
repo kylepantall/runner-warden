@@ -82,7 +82,7 @@ func windowsCmd() *cobra.Command {
 			}
 			script := ""
 			if userScript != "" {
-				b, err := os.ReadFile(userScript)
+				b, err := os.ReadFile(userScript) //nolint:gosec // script path supplied by the operator on the CLI
 				if err != nil {
 					return err
 				}

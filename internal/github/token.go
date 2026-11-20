@@ -18,7 +18,7 @@ var (
 // Token reads a token file, trimming whitespace. It refuses files readable by
 // group or others so a leaked mode never silently exposes the credential.
 func Token(file string) (string, error) {
-	f, err := os.Open(file)
+	f, err := os.Open(file) //nolint:gosec // token file path comes from root-owned config; mode is checked below
 	if err != nil {
 		return "", fmt.Errorf("open token file: %w", err)
 	}

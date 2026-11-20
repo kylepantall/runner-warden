@@ -47,10 +47,10 @@ func (f *fakeGH) ListOrgRepos(_ context.Context, org string) ([]gh.Repo, error) 
 	}
 	return out, nil
 }
-func (f *fakeGH) DefaultBranch(_ context.Context, owner, repo string) (string, error) {
+func (f *fakeGH) DefaultBranch(_ context.Context, _, _ string) (string, error) {
 	return "main", nil
 }
-func (f *fakeGH) ListWorkflowFiles(_ context.Context, owner, repo, ref string) ([]gh.WorkflowFile, error) {
+func (f *fakeGH) ListWorkflowFiles(_ context.Context, owner, repo, _ string) ([]gh.WorkflowFile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []gh.WorkflowFile
@@ -87,7 +87,7 @@ func (f *fakeGH) UpdateVariable(_ context.Context, scope core.Target, name, valu
 	f.vars[scope.String()+"|"+name] = value
 	return nil
 }
-func (f *fakeGH) CreateBranch(_ context.Context, owner, repo, branch, base string) (string, bool, error) {
+func (f *fakeGH) CreateBranch(_ context.Context, owner, repo, branch, _ string) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := owner + "/" + repo + "@" + branch
@@ -97,7 +97,7 @@ func (f *fakeGH) CreateBranch(_ context.Context, owner, repo, branch, base strin
 	f.branches[k] = map[string]string{}
 	return "tip", true, nil
 }
-func (f *fakeGH) CommitFiles(_ context.Context, owner, repo, branch, msg string, files []gh.FileChange) (string, bool, error) {
+func (f *fakeGH) CommitFiles(_ context.Context, owner, repo, branch, _ string, files []gh.FileChange) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := owner + "/" + repo + "@" + branch
@@ -123,7 +123,7 @@ func (f *fakeGH) CommitFiles(_ context.Context, owner, repo, branch, msg string,
 	}
 	return "c", changed, nil
 }
-func (f *fakeGH) OpenPR(_ context.Context, owner, repo, head, base, title, body string) (gh.PR, error) {
+func (f *fakeGH) OpenPR(_ context.Context, owner, repo, head, _, _, _ string) (gh.PR, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := owner + "/" + repo + "@" + head

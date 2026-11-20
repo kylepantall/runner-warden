@@ -53,7 +53,7 @@ type Retirer struct {
 	TrustedUID int
 }
 
-// Runner status in a manifest.
+// RunnerStatus is a runner's progress in a manifest.
 type RunnerStatus string
 
 // Statuses.
@@ -138,8 +138,6 @@ func (r *Retirer) defaults() {
 	}
 }
 
-func (r *Retirer) real(logical string) string { return filepath.Join(r.Root, logical) }
-
 func (r *Retirer) migrationDir() string { return filepath.Join(r.StateDir, "migration") }
 
 // TargetFromURL maps a GitHub URL to a target (owner or owner/repo).
@@ -172,7 +170,7 @@ func (r *Retirer) findSession() (*Manifest, error) {
 }
 
 func loadManifest(path string) (*Manifest, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // manifest path under the root-owned state dir
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +346,7 @@ func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
 // errPending stops a runner's steps without failing it.
 var errPending = errors.New("pending")
 
-func (r *Retirer) retireOne(ctx context.Context, m *Manifest, rec *RunnerRecord, j *Journal) {
+func (r *Retirer) retireOne(ctx context.Context, _ *Manifest, rec *RunnerRecord, j *Journal) {
 	name := rec.Name
 	if name == "" {
 		name = rec.Dir
