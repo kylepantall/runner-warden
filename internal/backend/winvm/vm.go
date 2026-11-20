@@ -50,17 +50,23 @@ func ownedBy(insp container.InspectResponse, cfg Config) error {
 
 // vmEnv is the dockurr/windows environment for a VM.
 func (p *Pool) vmEnv(v config.WindowsVM, password string) []string {
-	env := []string{
+	env := p.baseEnv(v)
+	if password != "" {
+		env = append(env, "PASSWORD="+password)
+	}
+	return env
+}
+
+// baseEnv is the VM environment without any credentials (also the input of
+// the drift hash).
+func (p *Pool) baseEnv(v config.WindowsVM) []string {
+	return []string{
 		"VERSION=" + v.Version,
 		"RAM_SIZE=" + ramSize(int64(v.Mem)),
 		"CPU_CORES=" + strconv.Itoa(v.CPUs),
 		"DISK_SIZE=" + v.DiskSize,
 		"USERNAME=" + p.cfg.Windows.SSHUser,
 	}
-	if password != "" {
-		env = append(env, "PASSWORD="+password)
-	}
-	return env
 }
 
 // containerSpec builds the VM container. storage/oem override the configured
@@ -102,7 +108,7 @@ func (p *Pool) containerSpec(v config.WindowsVM, storage, oem string, env []stri
 	}
 	// The spec hash detects config drift. It is built from the config without
 	// the guest password, which must not end up (even hashed) in a label.
-	specEnv := p.vmEnv(v, "")
+	specEnv := p.baseEnv(v)
 	h := sha256.New()
 	_ = json.NewEncoder(h).Encode([]any{cfg.Image, specEnv, hc.Binds, hc.PortBindings, hc.CgroupParent})
 	cfg.Labels[labelSpec] = hex.EncodeToString(h.Sum(nil))[:16]
