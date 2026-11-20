@@ -97,19 +97,45 @@ type Linux struct {
 }
 
 type Windows struct {
-	Enabled       bool     `toml:"enabled"`
-	MaxConcurrent int      `toml:"max_concurrent"` // licences; required when enabled
-	Image         string   `toml:"image"`          // dockurr/windows
-	StorageDir    string   `toml:"storage_dir"`    // VM disk + state
-	VMMem         Size     `toml:"vm_mem"`
-	VMCPUs        int      `toml:"vm_cpus"`
-	SSHPort       int      `toml:"ssh_port"`
-	SSHUser       string   `toml:"ssh_user"`
-	SSHKeyFile    string   `toml:"ssh_key_file"`
-	RunnerDir     string   `toml:"runner_dir"` // inside the guest
-	WorkDir       string   `toml:"work_dir"`   // inside the guest, wiped per job
-	IdleTTL       Duration `toml:"idle_ttl"`
-	Container     string   `toml:"container"` // container name to manage or adopt
+	Enabled       bool        `toml:"enabled"`
+	MaxConcurrent int         `toml:"max_concurrent"` // licences; required when enabled
+	Image         string      `toml:"image"`          // dockurr/windows
+	SSHUser       string      `toml:"ssh_user"`
+	SSHKeyFile    string      `toml:"ssh_key_file"`
+	RunnerDir     string      `toml:"runner_dir"` // inside the guest
+	WorkDir       string      `toml:"work_dir"`   // inside the guest, wiped per job
+	RunnerVersion string      `toml:"runner_version"`
+	IdleTTL       Duration    `toml:"idle_ttl"`
+	VMs           []WindowsVM `toml:"vm"`
+}
+
+// WindowsVM is one dockurr/windows VM. Each runs one job at a time.
+type WindowsVM struct {
+	Name       string   `toml:"name"`
+	StorageDir string   `toml:"storage_dir"` // VM disk + state (mounted at /storage)
+	OEMDir     string   `toml:"oem_dir"`     // first-boot scripts (mounted at /oem)
+	Mem        Size     `toml:"mem"`
+	CPUs       int      `toml:"cpus"`
+	DiskSize   string   `toml:"disk_size"`
+	Version    string   `toml:"version"`  // dockurr VERSION, e.g. "11"
+	SSHPort    int      `toml:"ssh_port"` // bound to 127.0.0.1 only
+	Targets    []string `toml:"targets"`  // owner or owner/repo; empty = any Windows target
+}
+
+// Container is the Docker container name of a VM.
+func (v WindowsVM) Container(instance string) string { return instance + "-win-" + v.Name }
+
+// Serves reports whether the VM may run jobs for a target.
+func (v WindowsVM) Serves(t core.Target) bool {
+	if len(v.Targets) == 0 {
+		return true
+	}
+	for _, s := range v.Targets {
+		if s == t.Owner || s == t.String() {
+			return true
+		}
+	}
+	return false
 }
 
 type Hang struct {
@@ -279,19 +305,25 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	def(&c.Windows.Image, "dockurr/windows")
-	def(&c.Windows.StorageDir, filepath.Join(c.StateDir, "windows"))
-	defSize(&c.Windows.VMMem, 8*units.GiB)
-	if c.Windows.VMCPUs == 0 {
-		c.Windows.VMCPUs = 4
-	}
-	if c.Windows.SSHPort == 0 {
-		c.Windows.SSHPort = 2222
-	}
 	def(&c.Windows.SSHUser, "runner")
+	def(&c.Windows.SSHKeyFile, filepath.Join(EtcDir, c.Instance, "windows_ed25519"))
 	def(&c.Windows.RunnerDir, `C:\actions-runner`)
 	def(&c.Windows.WorkDir, `C:\rw`)
 	defDur(&c.Windows.IdleTTL, 15*time.Minute)
-	def(&c.Windows.Container, c.Instance+"-windows")
+	for i := range c.Windows.VMs {
+		v := &c.Windows.VMs[i]
+		def(&v.StorageDir, filepath.Join(c.StateDir, "windows", v.Name, "storage"))
+		def(&v.OEMDir, filepath.Join(c.StateDir, "windows", v.Name, "oem"))
+		defSize(&v.Mem, 8*units.GiB)
+		if v.CPUs == 0 {
+			v.CPUs = 4
+		}
+		def(&v.DiskSize, "96G")
+		def(&v.Version, "11")
+		if v.SSHPort == 0 {
+			v.SSHPort = 2222 + i
+		}
+	}
 
 	defDur(&c.Hang.Idle, 30*time.Minute)
 	defDur(&c.Hang.MaxDuration, 6*time.Hour)
@@ -344,6 +376,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Windows.Enabled && c.Windows.MaxConcurrent < 1 {
 		add("windows.max_concurrent is required when windows is enabled (number of Windows licences)")
+	}
+	if c.Windows.Enabled && len(c.Windows.VMs) == 0 {
+		add("windows: define at least one [[windows.vm]]")
+	}
+	vmNames, vmPorts := map[string]bool{}, map[int]bool{}
+	for i, v := range c.Windows.VMs {
+		if naming.ValidatePrefix(v.Name) != nil {
+			add("windows.vm[%d]: name must be lowercase letters, digits and hyphens", i)
+		}
+		if vmNames[v.Name] || vmPorts[v.SSHPort] {
+			add("windows.vm %q: duplicate name or ssh_port", v.Name)
+		}
+		vmNames[v.Name], vmPorts[v.SSHPort] = true, true
 	}
 	if !c.Linux.Enabled && !c.Windows.Enabled {
 		add("enable at least one of [linux] or [windows]")
