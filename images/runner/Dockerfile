@@ -13,6 +13,8 @@ RUN set -eux; \
       bc build-essential ca-certificates cmake file gnupg imagemagick make \
       netcat-openbsd openssh-client php-cli php-curl php-mbstring php-xml \
       php-zip rsync wget xz-utils zip zstd \
+      clang lld llvm ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+      libnss3 libnspr4 libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libpango-1.0-0 libcairo2 libdbus-1-3 xvfb \
       fontconfig fonts-dejavu-core libfontconfig1 libfreetype6 libice6 libsm6 libx11-6 libxext6 libxrender1 libxrandr2 libxi6 libxcursor1 libgl1 libegl1; \
     # Terraform
     wget -qO- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg; \
