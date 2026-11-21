@@ -33,6 +33,8 @@ type Grant struct {
 	CPUSet   string // pinned logical cpus, "" for shared
 	Parked   bool   // overhead-only reservation: the job's hook waits for the rest
 	Job      core.Job
+	Devices  []string // host devices from the matching cost rule
+	Image    string   // runner image from the matching cost rule, "" for default
 }
 
 // Runners starts and stops runners; implemented by the daemon over backends

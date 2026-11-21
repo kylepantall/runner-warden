@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,6 +22,9 @@ import (
 )
 
 type fakeAPI struct {
+	pulls        []string
+	pullErr      error
+	missing      map[string]bool // image refs ImageInspect reports absent
 	inspectBinds []string
 	mu           sync.Mutex
 	created      []*container.Config
@@ -103,10 +107,19 @@ func (f *fakeAPI) VolumeRemove(_ context.Context, id string, _ bool) error {
 	f.volRemove = append(f.volRemove, id)
 	return nil
 }
-func (f *fakeAPI) ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error) {
+func (f *fakeAPI) ImagePull(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls = append(f.pulls, ref)
+	if f.pullErr != nil {
+		return nil, f.pullErr
+	}
 	return io.NopCloser(strings.NewReader("")), nil
 }
-func (f *fakeAPI) ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error) {
+func (f *fakeAPI) ImageInspect(_ context.Context, ref string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+	if f.missing[ref] {
+		return image.InspectResponse{}, errors.New("no such image")
+	}
 	return image.InspectResponse{}, nil
 }
 
@@ -389,5 +402,33 @@ func TestAdoptRestartsProxyOnSameSocket(t *testing.T) {
 	}
 	if err := b.Adopt(context.Background(), core.Handle{RunnerName: "../x"}); err == nil {
 		t.Fatal("invalid name adopted")
+	}
+}
+
+func TestEnsureImagePullsOncePerRefresh(t *testing.T) {
+	api := &fakeAPI{missing: map[string]bool{"job:img": true}}
+	b := testBackend(t, api)
+	ctx := context.Background()
+	if err := b.EnsureImage(ctx, "runner:img"); err != nil || len(api.pulls) != 0 {
+		t.Fatalf("default image must not be pulled again: %v %v", err, api.pulls)
+	}
+	if err := b.EnsureImage(ctx, "job:img"); err != nil {
+		t.Fatal(err)
+	}
+	api.missing = nil // now local
+	if err := b.EnsureImage(ctx, "job:img"); err != nil || len(api.pulls) != 1 {
+		t.Fatalf("second use within the refresh window must not pull: %v %v", err, api.pulls)
+	}
+}
+
+func TestEnsureImageFailures(t *testing.T) {
+	ctx := context.Background()
+	api := &fakeAPI{pullErr: errors.New("registry down")}
+	if err := testBackend(t, api).EnsureImage(ctx, "job:img"); err != nil {
+		t.Fatalf("local copy must be used when the pull fails: %v", err)
+	}
+	api = &fakeAPI{pullErr: errors.New("registry down"), missing: map[string]bool{"job:img": true}}
+	if err := testBackend(t, api).EnsureImage(ctx, "job:img"); err == nil {
+		t.Fatal("missing image with a failed pull must error")
 	}
 }

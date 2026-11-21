@@ -401,3 +401,26 @@ func TestRestoreBusyRunnerWithoutJob(t *testing.T) {
 		t.Fatalf("runner not reaped after completion: stops=%d", len(h.run.stops))
 	}
 }
+
+// ---- cost rule devices and image reach the grant ----
+
+func TestGrantCarriesRuleDevicesAndImage(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.Costs = []admission.Rule{{Match: "*/*/*/emu", Mem: gib, Devices: []string{"/dev/kvm"}, Image: "ci/android:1"}}
+	})
+	l := lane("a", 1)
+	h.begin(l, h.assign(l, h.job("a", "emu")))
+	h.begin(l, h.assign(l, h.job("a", "plain")))
+	h.run.mu.Lock()
+	defer h.run.mu.Unlock()
+	if len(h.run.starts) != 2 {
+		t.Fatalf("starts=%d", len(h.run.starts))
+	}
+	emu, plain := h.run.starts[0], h.run.starts[1]
+	if len(emu.Devices) != 1 || emu.Devices[0] != "/dev/kvm" || emu.Image != "ci/android:1" {
+		t.Fatalf("emu grant %+v", emu)
+	}
+	if len(plain.Devices) != 0 || plain.Image != "" {
+		t.Fatalf("plain grant %+v", plain)
+	}
+}

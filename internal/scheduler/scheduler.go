@@ -30,6 +30,8 @@ type jobRec struct {
 	phase     phase
 	cost      int64
 	pinned    int
+	devices   []string
+	image     string
 	age       time.Time
 	ageKey    string
 	seq       int
@@ -388,6 +390,7 @@ func (s *Scheduler) newJob(lk LaneKey, j core.Job) *jobRec {
 			r.cost = rule.Mem
 		}
 		r.pinned = rule.PinnedCores
+		r.devices, r.image = rule.Devices, rule.Image
 	}
 	if a, ok := s.ages[r.ageKey]; ok {
 		r.age = a.t
@@ -1228,7 +1231,7 @@ func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.
 	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey}
 	s.runners[tok] = rr
 	rec.rr, rec.phase = rr, pStarting
-	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job}
+	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job, Devices: rec.devices, Image: rec.image}
 	lk := rec.lane
 	s.log.info("starting runner", "job", rec.id, "lane", lk.Lane, "mem", res.Mem, "parked", parked)
 	s.effect(func(ctx context.Context) {
