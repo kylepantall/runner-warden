@@ -221,7 +221,11 @@ func (s *Scheduler) vmManaged(lk LaneKey) bool {
 // memory (reserved separately) is the job's memory, so only overhead remains.
 func (s *Scheduler) fullReq(r *jobRec) admission.Request {
 	if s.vmManaged(r.lane) {
-		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
+		cpu := r.cpu
+		if s.o.RemoteVM != nil && s.o.RemoteVM(r.lane) {
+			cpu = 0
+		}
+		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: cpu}
 	}
 	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
 }

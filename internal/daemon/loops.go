@@ -19,6 +19,8 @@ type WindowsPool interface {
 	EnsureUp(ctx context.Context, vm string) error
 	WorkFolder(vm, runner string) string
 	StopIdle(ctx context.Context, now time.Time) []string
+	IsRemote(vm string) bool
+	HostsUp() map[string]bool // remote hosts: reachable or not
 }
 
 const monitorEvery = 15 * time.Second
@@ -354,6 +356,8 @@ type StatusReport struct {
 	Scheduler scheduler.Status `json:"scheduler"`
 	Runners   []RunnerStatus   `json:"runners"`
 	VMsUp     map[string]int64 `json:"vms_up,omitempty"`
+	// WindowsHosts are remote Windows hosts and whether they answer.
+	WindowsHosts map[string]bool `json:"windows_hosts,omitempty"`
 	// Persistent are containers that outlive runners; their memory counts as
 	// external reservation.
 	Persistent []core.PersistentContainer `json:"persistent,omitempty"`
@@ -405,6 +409,7 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 	}
 	if d.win != nil {
 		rep.VMsUp = d.win.VMsUp()
+		rep.WindowsHosts = d.win.HostsUp()
 	}
 	return rep
 }

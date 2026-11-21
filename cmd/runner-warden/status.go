@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,6 +113,13 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 	fmt.Fprintf(out, "jobs     %d held, %d parked · %d runners\n", s.Held, s.Parked, s.Runners)
 	for vm, mem := range rep.VMsUp {
 		fmt.Fprintf(out, "windows  vm %s up (%s reserved)\n", vm, size(mem))
+	}
+	for _, h := range slices.Sorted(maps.Keys(rep.WindowsHosts)) {
+		state := "reachable"
+		if !rep.WindowsHosts[h] {
+			state = "UNREACHABLE"
+		}
+		fmt.Fprintf(out, "windows  host %s %s\n", h, state)
 	}
 
 	idle := 0

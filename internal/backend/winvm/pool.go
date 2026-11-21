@@ -58,6 +58,10 @@ var (
 	ErrBadRunner = errors.New("winvm: invalid runner name")
 	// ErrForeignAlive means a foreign container is still running.
 	ErrForeignAlive = errors.New("winvm: foreign container is running")
+	// ErrRemote means the operation needs a VM, not a [[windows.host]].
+	ErrRemote = errors.New("winvm: not supported on a remote windows host")
+	// ErrHostDown means a remote windows host did not answer over SSH.
+	ErrHostDown = errors.New("winvm: remote windows host unreachable")
 )
 
 // Config configures the Pool.
@@ -74,6 +78,7 @@ type Config struct {
 	StopSSHTimeout  time.Duration // default 3m before the VM is restarted
 	StopTimeout     time.Duration // graceful docker stop, default 2m
 	SSHPoll         time.Duration // default 5s
+	HostProbe       time.Duration // SSH wait for a remote host, default 20s
 	// TaskLogon is the Scheduled Task logon type: Interactive (default; needs
 	// the dockurr auto-logon session) or S4U.
 	TaskLogon string
@@ -147,23 +152,42 @@ func New(cfg Config) (*Pool, error) {
 	}
 	p.exec = func(vm config.WindowsVM) (Exec, error) {
 		return NewSSHExec(SSHConfig{
-			Addr: sshAddr(vm), User: cfg.Windows.SSHUser, Signer: signer, KnownHosts: p.knownHosts(vm.Name),
+			Addr: sshAddr(vm), User: sshUser(cfg.Windows, vm), Signer: signer, KnownHosts: p.knownHosts(vm.Name),
 		}), nil
 	}
 	p.passExec = func(vm config.WindowsVM, pw string) Exec {
-		return NewSSHExec(SSHConfig{Addr: sshAddr(vm), User: cfg.Windows.SSHUser, Password: pw, KnownHosts: p.knownHosts(vm.Name)})
+		return NewSSHExec(SSHConfig{Addr: sshAddr(vm), User: sshUser(cfg.Windows, vm), Password: pw, KnownHosts: p.knownHosts(vm.Name)})
 	}
 	return p, nil
 }
 
-func sshAddr(vm config.WindowsVM) string { return fmt.Sprintf("127.0.0.1:%d", vm.SSHPort) }
+func sshAddr(vm config.WindowsVM) string {
+	if vm.IsRemote() {
+		return vm.Remote
+	}
+	return fmt.Sprintf("127.0.0.1:%d", vm.SSHPort)
+}
+
+func sshUser(w config.Windows, vm config.WindowsVM) string { return orDefault(vm.SSHUser, w.SSHUser) }
+
+// taskLogon is the Scheduled Task logon for a member: a remote host defaults
+// to S4U, which runs whether or not anyone is signed in.
+func (p *Pool) taskLogon(v config.WindowsVM) string {
+	if v.TaskLogon != "" {
+		return v.TaskLogon
+	}
+	if v.IsRemote() {
+		return "S4U"
+	}
+	return p.cfg.TaskLogon
+}
 
 func newPool(cfg Config, api dockerAPI, exec func(config.WindowsVM) (Exec, error)) (*Pool, error) {
 	switch {
 	case cfg.Instance == "" || cfg.StateDir == "" || cfg.Slice == "":
 		return nil, errors.New("winvm: instance, state dir and slice are required")
-	case len(cfg.Windows.VMs) == 0:
-		return nil, errors.New("winvm: no VMs configured")
+	case len(cfg.Windows.Members()) == 0:
+		return nil, errors.New("winvm: no VMs or hosts configured")
 	}
 	dur := func(d *time.Duration, def time.Duration) {
 		if *d <= 0 {
@@ -174,6 +198,7 @@ func newPool(cfg Config, api dockerAPI, exec func(config.WindowsVM) (Exec, error
 	dur(&cfg.StopSSHTimeout, 3*time.Minute)
 	dur(&cfg.StopTimeout, 2*time.Minute)
 	dur(&cfg.SSHPoll, 5*time.Second)
+	dur(&cfg.HostProbe, 20*time.Second)
 	if cfg.TaskLogon == "" {
 		cfg.TaskLogon = "Interactive"
 	}
@@ -195,7 +220,7 @@ func newPool(cfg Config, api dockerAPI, exec func(config.WindowsVM) (Exec, error
 		runners: map[string]*runnerRec{}, execs: map[string]Exec{}, logBytes: map[string]int64{}, vmLocks: map[string]*sync.Mutex{},
 		version: cfg.Windows.RunnerVersion,
 	}
-	for _, v := range cfg.Windows.VMs {
+	for _, v := range cfg.Windows.Members() {
 		p.vms[v.Name] = v
 		p.order = append(p.order, v.Name)
 		p.vmLocks[v.Name] = &sync.Mutex{}
@@ -226,7 +251,8 @@ func (p *Pool) paths(runner string) jobPaths {
 	return jobPaths{Runner: runner, RunnerDir: p.cfg.Windows.RunnerDir, WorkRoot: p.cfg.Windows.WorkDir}
 }
 
-// Caps reports the VM limits: FixedMemBytes is the largest VM; use MemFor for the exact value.
+// Caps reports the limits: FixedMemBytes is the largest VM; use MemFor for
+// the exact value. Remote hosts add one concurrent job each.
 func (p *Pool) Caps() core.Caps {
 	var mem int64
 	for _, v := range p.cfg.Windows.VMs {
@@ -236,11 +262,28 @@ func (p *Pool) Caps() core.Caps {
 	if m := p.cfg.Windows.MaxConcurrent; m > 0 {
 		n = min(n, m)
 	}
-	return core.Caps{OS: core.Windows, FixedMemBytes: mem, MaxConcurrent: n}
+	return core.Caps{OS: core.Windows, FixedMemBytes: mem, MaxConcurrent: n + len(p.cfg.Windows.Hosts)}
 }
 
-// MemFor is the RAM a VM holds while its container is up.
+// MemFor is the RAM a VM holds on this host while its container is up; 0 for
+// a remote host.
 func (p *Pool) MemFor(vm string) int64 { return int64(p.vms[vm].Mem) }
+
+// IsRemote reports whether vm is a [[windows.host]].
+func (p *Pool) IsRemote(vm string) bool { return p.vms[vm].IsRemote() }
+
+// HostsUp reports each remote host and whether it last answered over SSH.
+func (p *Pool) HostsUp() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]bool{}
+	for name, v := range p.vms {
+		if v.IsRemote() {
+			out[name] = p.up[name]
+		}
+	}
+	return out
+}
 
 // Up reports whether the VM container is running.
 func (p *Pool) Up(vm string) bool {
@@ -279,8 +322,8 @@ func (p *Pool) busyLocked(vm string) bool {
 // licencesLocked counts VMs that are up or about to be, except skip.
 func (p *Pool) licencesLocked(skip string) int {
 	n := 0
-	for name := range p.vms {
-		if name != skip && (p.up[name] || p.claimed[name]) {
+	for name, v := range p.vms {
+		if name != skip && !v.IsRemote() && (p.up[name] || p.claimed[name]) {
 			n++
 		}
 	}
@@ -291,7 +334,7 @@ func (p *Pool) licenceCap() int {
 	if m := p.cfg.Windows.MaxConcurrent; m > 0 {
 		return m
 	}
-	return len(p.vms)
+	return len(p.cfg.Windows.VMs)
 }
 
 // Pick claims an idle VM serving target, preferring one already running. It
@@ -308,7 +351,7 @@ func (p *Pool) Pick(target core.Target) (string, bool) {
 			p.claimed[name] = true
 			return name, true
 		}
-		if cold == "" {
+		if cold == "" && !p.vms[name].IsRemote() { // a down host is not booted
 			cold = name
 		}
 	}
@@ -333,7 +376,7 @@ func (p *Pool) Peek(target core.Target) (vm string, mem int64, up bool) {
 		if p.up[name] {
 			return name, int64(p.vms[name].Mem), true
 		}
-		if cold == "" {
+		if cold == "" && !p.vms[name].IsRemote() {
 			cold = name
 		}
 	}
@@ -354,13 +397,10 @@ func (p *Pool) Release(vm string) {
 // Prepare pulls the image if missing, resolves the runner version, loads
 // persisted runner state and discovers which VM containers are running.
 func (p *Pool) Prepare(ctx context.Context) error {
-	if _, err := p.api.ImageInspect(ctx, p.cfg.Windows.Image); err != nil {
-		rc, err := p.api.ImagePull(ctx, p.cfg.Windows.Image, image.PullOptions{})
-		if err != nil {
-			return fmt.Errorf("pull %s: %w", p.cfg.Windows.Image, err)
+	if len(p.cfg.Windows.VMs) > 0 { // hosts alone need no image
+		if err := p.ensureImage(ctx); err != nil {
+			return err
 		}
-		_, _ = io.Copy(io.Discard, rc)
-		_ = rc.Close()
 	}
 	if _, err := p.runnerVersion(ctx); err != nil {
 		p.log.Warn("runner version lookup failed", "error", err.Error())
@@ -370,8 +410,13 @@ func (p *Pool) Prepare(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		insp, err := p.api.ContainerInspect(ctx, p.vms[name].Container(p.cfg.Instance))
-		running := err == nil && insp.State != nil && insp.State.Running && ownedBy(insp, p.cfg) == nil
+		var running bool
+		if p.vms[name].IsRemote() {
+			running = p.probeHost(ctx, name) == nil
+		} else {
+			insp, err := p.api.ContainerInspect(ctx, p.vms[name].Container(p.cfg.Instance))
+			running = err == nil && insp.State != nil && insp.State.Running && ownedBy(insp, p.cfg) == nil
+		}
 		p.mu.Lock()
 		p.up[name] = running
 		p.lastActive[name] = p.now()
@@ -381,6 +426,18 @@ func (p *Pool) Prepare(ctx context.Context) error {
 		p.mu.Unlock()
 	}
 	return nil
+}
+
+func (p *Pool) ensureImage(ctx context.Context) error {
+	if _, err := p.api.ImageInspect(ctx, p.cfg.Windows.Image); err == nil {
+		return nil
+	}
+	rc, err := p.api.ImagePull(ctx, p.cfg.Windows.Image, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull %s: %w", p.cfg.Windows.Image, err)
+	}
+	_, _ = io.Copy(io.Discard, rc)
+	return rc.Close()
 }
 
 // List returns the runners recorded in the per-VM state files.

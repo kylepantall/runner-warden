@@ -61,7 +61,7 @@ func hostIDForCLI(cfg *config.Config) (string, error) {
 }
 
 func windowsCmd() *cobra.Command {
-	c := &cobra.Command{Use: "windows", Short: "Manage Windows VMs"}
+	c := &cobra.Command{Use: "windows", Short: "Manage Windows VMs and hosts"}
 	var userScript string
 	provision := &cobra.Command{
 		Use:   "provision <vm>",
@@ -135,6 +135,75 @@ func windowsCmd() *cobra.Command {
 	_ = adopt.MarkFlagRequired("from")
 	_ = adopt.MarkFlagRequired("password-file")
 
-	c.AddCommand(provision, adopt)
+	hostScript := &cobra.Command{
+		Use:   "host-script <host>",
+		Short: "Print the PowerShell that prepares a [[windows.host]] for SSH",
+		Long: "Prints a script to run once, elevated, on the Windows host: it enables OpenSSH Server " +
+			"and trusts runner-warden's key for administrators. Then run `runner-warden windows host-setup <host>`.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if !isWindowsHost(cfg, args[0]) {
+				return fmt.Errorf("no [[windows.host]] named %q", args[0])
+			}
+			_, pub, err := winvm.EnsureKey(cfg.Windows.SSHKeyFile)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(cmd.OutOrStdout(), winvm.HostScript(pub))
+			return nil
+		},
+	}
+	var hostUserScript string
+	hostSetup := &cobra.Command{
+		Use:   "host-setup <host>",
+		Short: "Install the baseline and runner files on a [[windows.host]] over SSH",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if !isWindowsHost(cfg, args[0]) {
+				return fmt.Errorf("no [[windows.host]] named %q", args[0])
+			}
+			hostID, err := hostIDForCLI(cfg)
+			if err != nil {
+				return err
+			}
+			p, err := newWindowsPool(cfg, hostID, newLogger("info"))
+			if err != nil {
+				return err
+			}
+			script := ""
+			if hostUserScript != "" {
+				b, err := os.ReadFile(hostUserScript) //nolint:gosec // script path supplied by the operator on the CLI
+				if err != nil {
+					return err
+				}
+				script = string(b)
+			}
+			if err := p.SetupHost(cmd.Context(), args[0], script); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Host %s is ready. Restart the service to start using it.\n", args[0])
+			return nil
+		},
+	}
+	hostSetup.Flags().StringVar(&hostUserScript, "script", "", "extra PowerShell setup script (toolchains)")
+
+	c.AddCommand(provision, adopt, hostScript, hostSetup)
 	return c
+}
+
+func isWindowsHost(cfg *config.Config, name string) bool {
+	for _, h := range cfg.Windows.Hosts {
+		if h.Name == name {
+			return true
+		}
+	}
+	return false
 }

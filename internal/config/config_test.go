@@ -96,3 +96,46 @@ func TestSaveRoundTrip(t *testing.T) {
 		t.Fatal("round trip mismatch")
 	}
 }
+
+const hostsOnly = `prefix="my-ci"
+[limits]
+memory_budget="1GiB"
+[windows]
+enabled=true
+[[windows.host]]
+name="pc"
+address="pc.tail:2200"
+targets=["*"]
+[[target]]
+org="acme"
+os=["windows"]
+`
+
+func TestWindowsHostsOnly(t *testing.T) {
+	c, err := Load(write(t, hostsOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.Windows.Members()
+	if len(m) != 1 || !m[0].IsRemote() || m[0].Remote != "pc.tail:2200" {
+		t.Fatalf("%+v", m)
+	}
+	if (WindowsHost{Address: "10.0.0.5"}).SSHAddr() != "10.0.0.5:22" {
+		t.Fatal("default port")
+	}
+}
+
+func TestWindowsHostRejects(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[windows]\nenabled=true\n"
+	for name, s := range map[string]string{
+		"no address":   "[[windows.host]]\nname=\"pc\"\ntargets=[\"*\"]\n",
+		"no targets":   "[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\n",
+		"bad logon":    "[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\ntask_logon=\"Batch\"\n",
+		"user in addr": "[[windows.host]]\nname=\"pc\"\naddress=\"me@pc\"\ntargets=[\"*\"]\n",
+		"dup name":     "[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n[[windows.host]]\nname=\"pc\"\naddress=\"pc2\"\ntargets=[\"*\"]\n",
+	} {
+		if _, err := Load(write(t, base+s)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}

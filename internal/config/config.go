@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -138,6 +139,40 @@ type Windows struct {
 	TaskLogon     string      `toml:"task_logon"` // Interactive (default) or S4U
 	IdleTTL       Duration    `toml:"idle_ttl"`
 	VMs           []WindowsVM `toml:"vm"`
+	// Hosts are separate Windows machines reached over SSH. They are always
+	// on, use none of this host's memory or CPU and no licence of
+	// max_concurrent; each runs one job at a time.
+	Hosts []WindowsHost `toml:"host"`
+}
+
+// WindowsHost is a Windows machine runner-warden drives over SSH.
+type WindowsHost struct {
+	Name      string   `toml:"name"`
+	Address   string   `toml:"address"`    // host or host:port (default port 22)
+	SSHUser   string   `toml:"ssh_user"`   // default windows.ssh_user
+	TaskLogon string   `toml:"task_logon"` // default windows.task_logon
+	Targets   []string `toml:"targets"`    // as for [[windows.vm]]
+}
+
+// SSHAddr is the host's address with the port filled in.
+func (h WindowsHost) SSHAddr() string {
+	if _, _, err := net.SplitHostPort(h.Address); err == nil {
+		return h.Address
+	}
+	return net.JoinHostPort(h.Address, "22")
+}
+
+// Members returns every VM and host as WindowsVMs, VMs first. A host has
+// Remote set and no container, memory or CPUs.
+func (w Windows) Members() []WindowsVM {
+	out := append([]WindowsVM(nil), w.VMs...)
+	for _, h := range w.Hosts {
+		out = append(out, WindowsVM{
+			Name: h.Name, Targets: h.Targets, Remote: h.SSHAddr(),
+			SSHUser: h.SSHUser, TaskLogon: h.TaskLogon,
+		})
+	}
+	return out
 }
 
 // WindowsVM is one dockurr/windows VM. Each runs one job at a time.
@@ -151,7 +186,15 @@ type WindowsVM struct {
 	Version    string   `toml:"version"`  // dockurr VERSION, e.g. "11"
 	SSHPort    int      `toml:"ssh_port"` // bound to 127.0.0.1 only
 	Targets    []string `toml:"targets"`  // owner or owner/repo; "*" = any (required: jobs share a persistent VM)
+
+	// Set by Members for a [[windows.host]], never read from the file.
+	Remote    string `toml:"-"` // SSH address of a separate machine
+	SSHUser   string `toml:"-"` // overrides windows.ssh_user
+	TaskLogon string `toml:"-"` // overrides windows.task_logon
 }
+
+// IsRemote reports a [[windows.host]] member.
+func (v WindowsVM) IsRemote() bool { return v.Remote != "" }
 
 // Container is the Docker container name of a VM.
 func (v WindowsVM) Container(instance string) string { return instance + "-win-" + v.Name }
@@ -443,11 +486,11 @@ func (c *Config) Validate() error {
 	if c.Limits.MemoryBudget <= 0 {
 		add("limits.memory_budget is required")
 	}
-	if c.Windows.Enabled && c.Windows.MaxConcurrent < 1 {
+	if c.Windows.Enabled && len(c.Windows.VMs) > 0 && c.Windows.MaxConcurrent < 1 {
 		add("windows.max_concurrent is required when windows is enabled (number of Windows licences)")
 	}
-	if c.Windows.Enabled && len(c.Windows.VMs) == 0 {
-		add("windows: define at least one [[windows.vm]]")
+	if c.Windows.Enabled && len(c.Windows.VMs) == 0 && len(c.Windows.Hosts) == 0 {
+		add("windows: define at least one [[windows.vm]] or [[windows.host]]")
 	}
 	vmNames, vmPorts := map[string]bool{}, map[int]bool{}
 	for i, v := range c.Windows.VMs {
@@ -460,6 +503,24 @@ func (c *Config) Validate() error {
 		vmNames[v.Name], vmPorts[v.SSHPort] = true, true
 		if len(v.Targets) == 0 {
 			add("windows.vm %q: set targets (owners or owner/repo; [\"*\"] for any): jobs share this persistent VM", v.Name)
+		}
+	}
+	for i, h := range c.Windows.Hosts {
+		if naming.ValidatePrefix(h.Name) != nil {
+			add("windows.host[%d]: name must be lowercase letters, digits and hyphens", i)
+		}
+		if vmNames[h.Name] {
+			add("windows.host %q: name already used by a vm or host", h.Name)
+		}
+		vmNames[h.Name] = true
+		if h.Address == "" || strings.ContainsAny(h.Address, " /@") {
+			add("windows.host %q: address must be a host or host:port", h.Name)
+		}
+		if len(h.Targets) == 0 {
+			add("windows.host %q: set targets (owners or owner/repo; [\"*\"] for any)", h.Name)
+		}
+		if h.TaskLogon != "" && h.TaskLogon != "Interactive" && h.TaskLogon != "S4U" {
+			add("windows.host %q: task_logon must be Interactive or S4U", h.Name)
 		}
 	}
 	if !c.Linux.Enabled && !c.Windows.Enabled {

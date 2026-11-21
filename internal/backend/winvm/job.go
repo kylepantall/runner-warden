@@ -120,7 +120,7 @@ func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 		_ = p.saveStateLocked(vm)
 		p.mu.Unlock()
 	}
-	if _, err := p.runScript(ctx, v, startJobScript(p.paths(spec.Name), p.cfg.TaskLogon), spec.JITConfig, startTimeout); err != nil {
+	if _, err := p.runScript(ctx, v, startJobScript(p.paths(spec.Name), p.taskLogon(v)), spec.JITConfig, startTimeout); err != nil {
 		return fail(err)
 	}
 	return core.Handle{RunnerName: spec.Name, BackendID: vm, StartedAt: rec.StartedAt}, nil
@@ -149,6 +149,9 @@ type vmSample struct {
 // sampleVM reads the VM container's counters from the Docker stats API.
 func (p *Pool) sampleVM(ctx context.Context, v config.WindowsVM) (vmSample, bool) {
 	var s vmSample
+	if v.IsRemote() {
+		return s, false // no container; Stats reads the guest's counters
+	}
 	r, err := p.api.ContainerStatsOneShot(ctx, v.Container(p.cfg.Instance))
 	if err != nil {
 		return s, false
@@ -188,12 +191,16 @@ func (p *Pool) Stats(ctx context.Context, h core.Handle) (core.Usage, error) {
 		return u, nil
 	}
 	v := p.vms[rec.VM]
-	insp, err := p.api.ContainerInspect(ctx, v.Container(p.cfg.Instance))
-	switch {
-	case err == nil:
-		u.Alive = insp.State != nil && insp.State.Running
-	case !cerrdefs.IsNotFound(err):
-		return u, err
+	if v.IsRemote() {
+		u.Alive = true // the guest's answer below decides
+	} else {
+		insp, err := p.api.ContainerInspect(ctx, v.Container(p.cfg.Instance))
+		switch {
+		case err == nil:
+			u.Alive = insp.State != nil && insp.State.Running
+		case !cerrdefs.IsNotFound(err):
+			return u, err
+		}
 	}
 	if s, ok := p.sampleVM(ctx, v); ok {
 		p.mu.Lock()
@@ -213,6 +220,11 @@ func (p *Pool) Stats(ctx context.Context, h core.Handle) (core.Usage, error) {
 		if g, err = parseGuestStats(out); err == nil {
 			u.Alive = g.Alive()
 			u.LogBytes = g.Log + g.Diag
+			if v.IsRemote() {
+				// Whole-machine counters: CPU seconds of live processes and
+				// memory in use. Enough for hang detection.
+				u.CPUSeconds, u.MemCurrent = g.CPU, g.Mem
+			}
 			p.mu.Lock()
 			p.logBytes[h.RunnerName] = u.LogBytes
 			p.mu.Unlock()

@@ -137,6 +137,10 @@ type Options struct {
 	// job's own cost is then overhead only, because the VM's memory is what the
 	// job uses. Nil keeps the plain per-job cost on every lane.
 	VMCost func(LaneKey) (vmMem int64, alreadyUp bool)
+	// RemoteVM reports that a Windows lane's next job goes to a separate
+	// machine, which takes none of this host's CPU. It runs under the
+	// scheduler lock and must not block. Nil = never.
+	RemoteVM func(LaneKey) bool
 }
 
 // OptionsFromConfig fills the config-driven fields. lanes lists every lane the
