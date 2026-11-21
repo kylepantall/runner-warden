@@ -14,6 +14,7 @@ import (
 	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
+	"github.com/kylepantall/runner-warden/internal/assets"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 	"github.com/kylepantall/runner-warden/internal/daemon"
@@ -41,6 +42,10 @@ func uninstallCmd() *cobra.Command {
 			unit := "runner-warden@" + cfg.Instance
 			_ = exec.CommandContext(ctx, "systemctl", "disable", "--now", unit).Run()
 			fmt.Fprintf(out, "✅ stopped %s\n", unit)
+			if lastInstance(cfg.Instance) {
+				_ = exec.CommandContext(ctx, "systemctl", "disable", "--now", assets.UpdateTimer).Run()
+				fmt.Fprintf(out, "✅ disabled %s (no instances left)\n", assets.UpdateTimer)
+			}
 
 			if token, err := gh.Token(cfg.GitHub.TokenFile); err == nil {
 				deleteScaleSets(ctx, cfg, token, out)
@@ -68,6 +73,18 @@ func uninstallCmd() *cobra.Command {
 	}
 	c.Flags().BoolVar(&purge, "purge", false, "also delete config, token and state (VM disks under the state dir included)")
 	return c
+}
+
+// lastInstance reports whether inst is the only configured instance, so the
+// host-wide update timer can go with it.
+func lastInstance(inst string) bool {
+	insts, _ := filepath.Glob(filepath.Join(config.EtcDir, "*", "config.toml"))
+	for _, p := range insts {
+		if filepath.Base(filepath.Dir(p)) != inst {
+			return false
+		}
+	}
+	return true
 }
 
 func deleteScaleSets(ctx context.Context, cfg *config.Config, token string, out interface{ Write([]byte) (int, error) }) {

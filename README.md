@@ -32,7 +32,7 @@ sudo runner-warden setup --prefix my-ci --org my-org --repo me/tool
 
 Then change workflows to `runs-on: my-ci-linux` (setup opens a PR per repo for you). `runs-on: my-ci` also works for Linux.
 
-`runner-warden` is a single binary in `/usr/local/bin`: `runner-warden --help` lists every command, and `sudo runner-warden update` keeps it current.
+`runner-warden` is a single binary in `/usr/local/bin`: `runner-warden --help` lists every command, and `sudo runner-warden update` keeps it current. `setup` also enables `runner-warden-update.timer`, which runs `update` daily around 04:00–06:00 (`setup --auto-update=false` turns it off).
 
 Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user with `repo` (+ `admin:org` for orgs, `workflow` for the label sweep).
 

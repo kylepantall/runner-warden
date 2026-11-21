@@ -58,7 +58,9 @@ fi
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
 $SUDO install -m 0755 "$TMP/runner-warden" "$BIN_DIR/runner-warden"
-$SUDO install -m 0644 "$TMP/packaging/systemd/runner-warden@.service" "$UNIT_DIR/runner-warden@.service"
+for u in "$TMP"/packaging/systemd/runner-warden*; do
+  $SUDO install -m 0644 "$u" "$UNIT_DIR/$(basename "$u")"
+done
 $SUDO systemctl daemon-reload
 
 echo "Installed $BIN_DIR/runner-warden $VERSION"

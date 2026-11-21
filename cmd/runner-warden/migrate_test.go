@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kylepantall/runner-warden/internal/assets"
 	"github.com/kylepantall/runner-warden/internal/migrate"
 )
 
@@ -63,7 +64,22 @@ func TestWritePlanTempIsPrivateAndUnique(t *testing.T) {
 
 func TestServiceCommandsRestartOnlyOnChange(t *testing.T) {
 	last := func(c [][]string) string { return c[len(c)-1][0] }
-	if last(serviceCommands("i", false)) != "start" || last(serviceCommands("i", true)) != "restart" {
+	if last(serviceCommands("i", false, true)) != "start" || last(serviceCommands("i", true, true)) != "restart" {
 		t.Fatal("verb")
+	}
+}
+
+func TestServiceCommandsTimer(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		want := map[bool]string{true: "enable", false: "disable"}[on]
+		found := false
+		for _, c := range serviceCommands("i", false, on) {
+			if c[len(c)-1] == assets.UpdateTimer {
+				found = c[0] == want
+			}
+		}
+		if !found {
+			t.Fatalf("autoUpdate=%v: want %s of the timer", on, want)
+		}
 	}
 }

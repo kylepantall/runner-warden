@@ -1,0 +1,11 @@
+[Unit]
+Description=runner-warden self-update
+Documentation=https://github.com/kylepantall/runner-warden
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Installs the latest release (checksum and, with cosign, signature verified)
+# and restarts running instances; a restart drains, so jobs keep going.
+ExecStart=/usr/local/bin/runner-warden update
