@@ -10,6 +10,8 @@ memory_budget = "22GiB"          # hard cap for all jobs (slice MemoryMax)
 swap_max = "2GiB"
 reserved_cores = "0-1"           # never pinned to jobs
 default_job_mem = "2GiB"         # cost of jobs no rule matches
+cpu_budget = 0                   # logical CPUs jobs share; 0 = all outside reserved_cores, -1 = unchecked
+default_job_cpus = 2             # CPU cost of jobs whose rule sets none
 light_threshold = "1GiB"         # jobs at or below may overtake held jobs
 lanes = 4                        # scale sets per repo/org and OS
 admission_timeout = "40m"
@@ -34,6 +36,7 @@ dir_mode = "2775"
 match = "my-org/app/ci.yml/maestro*"
 mem = "15GiB"
 pinned_cores = 3                 # optional: whole physical cores, SMT siblings together
+cpus = 4                         # optional: shared logical CPUs (ignored with pinned_cores)
 devices = ["/dev/kvm"]           # optional: host devices for matching jobs
 image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file)
 
@@ -79,6 +82,7 @@ targets = ["my-org", "me/tool"]  # empty = any Windows target
 | Situation | Do |
 |---|---|
 | A job needs lots of memory (emulators, big builds) | Add a `[[cost]]` rule. Until it fits, the job waits in GitHub's queue, its timeout not ticking |
+| CPU-heavy jobs (Gradle, compilers, VMs) | `cpus = N` on their rule. A job starts only when its memory and CPU both fit; pinned cores' threads count against `cpu_budget` |
 | Timing-sensitive tests | `pinned_cores = N` on their rule |
 | Small, fast jobs | Leave them at or below `light_threshold` so they overtake held heavy jobs |
 

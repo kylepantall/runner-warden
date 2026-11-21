@@ -98,6 +98,10 @@ type Limits struct {
 	HolGrace         Duration `toml:"hol_grace"`         // all lanes held this long => promote a parked runner
 	MaxParked        int      `toml:"max_parked"`        // parked runners allowed host-wide
 	ExternalReserved Size     `toml:"external_reserved"` // memory used outside the ledger
+	// CPUBudget is how many logical CPUs jobs may reserve between them; 0 =
+	// every logical CPU outside reserved_cores, negative = CPU unchecked.
+	CPUBudget      float64 `toml:"cpu_budget"`
+	DefaultJobCPUs float64 `toml:"default_job_cpus"` // CPU cost when no rule sets one
 }
 
 // Linux configures the Docker backend.
@@ -203,6 +207,7 @@ type Cost struct {
 	Match       string   `toml:"match"`
 	Mem         Size     `toml:"mem"`
 	PinnedCores int      `toml:"pinned_cores"`
+	CPUs        float64  `toml:"cpus"` // shared logical CPUs, 0 = default_job_cpus
 	Devices     []string `toml:"devices"`
 	// Image replaces the runner image for matching jobs (Linux). It must be
 	// built FROM the default runner image.
@@ -333,6 +338,9 @@ func (c *Config) ApplyDefaults() {
 		c.Limits.MaxParked = 4
 	}
 	defDur(&c.Limits.AdmissionTimeout, 40*time.Minute)
+	if c.Limits.DefaultJobCPUs == 0 {
+		c.Limits.DefaultJobCPUs = 2
+	}
 
 	def(&c.Linux.Image, "ghcr.io/kylepantall/runner-warden-runner:latest")
 	def(&c.Linux.DockerSocket, "/var/run/docker.sock")
@@ -477,6 +485,12 @@ func (c *Config) Validate() error {
 		if co.Mem <= 0 {
 			add("cost[%d]: mem is required", i)
 		}
+		if co.CPUs < 0 {
+			add("cost[%d]: cpus must not be negative", i)
+		}
+	}
+	if c.Limits.DefaultJobCPUs < 0 {
+		add("limits.default_job_cpus must not be negative")
 	}
 	seen := map[string]bool{}
 	for i, t := range c.Targets {

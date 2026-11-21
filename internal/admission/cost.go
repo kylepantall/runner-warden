@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"math"
 	"path"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ type Rule struct {
 	Match       string
 	Mem         int64
 	PinnedCores int
+	CPU         int64 // shared millicpus, 0 = default
 	Devices     []string
 	Image       string
 }
@@ -23,10 +25,13 @@ type Rule struct {
 func RulesFromConfig(cs []config.Cost) []Rule {
 	out := make([]Rule, len(cs))
 	for i, c := range cs {
-		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, Devices: c.Devices, Image: c.Image}
+		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, CPU: MilliCPU(c.CPUs), Devices: c.Devices, Image: c.Image}
 	}
 	return out
 }
+
+// MilliCPU converts logical CPUs to millicpus.
+func MilliCPU(cpus float64) int64 { return int64(math.Round(cpus * 1000)) }
 
 // WorkflowFile extracts the workflow file basename from a workflow ref such as
 // "owner/repo/.github/workflows/ci.yml@refs/heads/main".

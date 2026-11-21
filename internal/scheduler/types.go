@@ -96,7 +96,11 @@ type Options struct {
 	ReservedCPUs     []int
 	Costs            []admission.Rule
 
-	DefaultJobMem  int64 // default 2GiB
+	DefaultJobMem int64 // default 2GiB
+	// CPUBudget is the shared CPU jobs may reserve (millicpus); 0 = unchecked.
+	// DefaultJobCPU is a job's CPU when no rule sets one (millicpus).
+	CPUBudget      int64
+	DefaultJobCPU  int64
 	LightThreshold int64
 	RunnerOverhead int64
 
@@ -144,6 +148,7 @@ func OptionsFromConfig(c *config.Config, lanes []LaneKey) Options {
 		ExternalReserved: int64(c.Limits.ExternalReserved),
 		Costs:            admission.RulesFromConfig(c.Costs),
 		DefaultJobMem:    int64(c.Limits.DefaultJobMem),
+		DefaultJobCPU:    admission.MilliCPU(c.Limits.DefaultJobCPUs),
 		LightThreshold:   int64(c.Limits.LightThreshold),
 		RunnerOverhead:   int64(c.Limits.RunnerOverhead),
 		ReserveAfter:     c.Limits.ReserveAfter.D(),
@@ -248,6 +253,7 @@ type JobStatus struct {
 	State    JobState      `json:"state"`
 	Runner   string        `json:"runner,omitempty"`
 	Cost     int64         `json:"cost"`
+	CPU      int64         `json:"cpu_milli,omitempty"`
 	Pinned   int           `json:"pinned_cores,omitempty"`
 	Age      time.Duration `json:"age"`
 	Phantom  bool          `json:"phantom,omitempty"`

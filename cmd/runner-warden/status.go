@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -103,6 +105,9 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 		fmt.Fprint(out, "  DRAINING")
 	}
 	fmt.Fprintf(out, "\nmemory   %s\n", memoryLine(s))
+	if l := cpuLine(s); l != "" {
+		fmt.Fprintf(out, "cpu      %s\n", l)
+	}
 	fmt.Fprintf(out, "jobs     %d held, %d parked · %d runners\n", s.Held, s.Parked, s.Runners)
 	for vm, mem := range rep.VMsUp {
 		fmt.Fprintf(out, "windows  vm %s up (%s reserved)\n", vm, size(mem))
@@ -129,7 +134,7 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 				if j.Phantom {
 					name = j.Repo + " (not yet known)"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", l.Name, name, j.State, size(j.Cost), j.Age.Truncate(time.Second), dash(j.Runner))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", l.Name, name, j.State, jobCost(j), j.Age.Truncate(time.Second), dash(j.Runner))
 			}
 		}
 		_ = w.Flush()
@@ -174,10 +179,34 @@ func memoryLine(s scheduler.Status) string {
 	if u.External > 0 {
 		line += fmt.Sprintf(", %s outside runners", size(u.External))
 	}
-	if u.TotalCores > 0 {
-		line += fmt.Sprintf(" · %d/%d cores pinned", u.PinnedCores, u.TotalCores)
-	}
 	return line
+}
+
+// cpuLine summarises shared CPU and pinned cores, "" when neither is in use.
+func cpuLine(s scheduler.Status) string {
+	u := s.Ledger
+	var parts []string
+	if u.CPUBudget > 0 {
+		parts = append(parts, fmt.Sprintf("%s of %s reserved, %s free", cpus(u.CPUReserved), cpus(u.CPUBudget), cpus(u.CPUBudget-u.CPUReserved)))
+	}
+	if u.TotalCores > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d cores pinned", u.PinnedCores, u.TotalCores))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// cpus formats millicpus as logical CPUs ("4", "1.5").
+func cpus(m int64) string { return strconv.FormatFloat(float64(m)/1000, 'f', -1, 64) }
+
+// jobCost is the job's memory, plus its CPU or pinned cores.
+func jobCost(j scheduler.JobStatus) string {
+	switch {
+	case j.Pinned > 0:
+		return fmt.Sprintf("%s %dc", size(j.Cost), j.Pinned)
+	case j.CPU > 0:
+		return size(j.Cost) + " " + cpus(j.CPU) + "cpu"
+	}
+	return size(j.Cost)
 }
 
 func size(b int64) string {

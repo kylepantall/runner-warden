@@ -29,6 +29,7 @@ type jobRec struct {
 	lane      LaneKey
 	phase     phase
 	cost      int64
+	cpu       int64 // shared millicpus
 	pinned    int
 	devices   []string
 	image     string
@@ -144,6 +145,7 @@ func New(o Options) *Scheduler {
 		stats:   map[LaneKey]LaneStats{},
 		led: admission.New(admission.Config{
 			Budget: o.Budget, External: o.ExternalReserved, Cores: o.Cores, ReservedCPUs: o.ReservedCPUs,
+			CPUBudget: o.CPUBudget,
 		}),
 	}
 	s.locked(func() {
@@ -219,9 +221,9 @@ func (s *Scheduler) vmManaged(lk LaneKey) bool {
 // memory (reserved separately) is the job's memory, so only overhead remains.
 func (s *Scheduler) fullReq(r *jobRec) admission.Request {
 	if s.vmManaged(r.lane) {
-		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned}
+		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
 	}
-	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned}
+	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
 }
 
 // vmNeed is the VM memory a new grant on lk must reserve: zero unless the lane
@@ -369,17 +371,24 @@ func setJob(r *jobRec, j core.Job) {
 	r.job = j
 }
 
-// applyRule sets the job's cost, pinned cores, devices and image from the
-// first matching [[cost]] rule, or the defaults.
+// applyRule sets the job's cost, CPU, pinned cores, devices and image from
+// the first matching [[cost]] rule, or the defaults. A job with pinned cores
+// runs on those and takes no shared CPU.
 func (s *Scheduler) applyRule(r *jobRec) {
 	j := r.job
-	r.cost, r.pinned, r.devices, r.image = s.o.DefaultJobMem, 0, nil, ""
+	r.cost, r.cpu, r.pinned, r.devices, r.image = s.o.DefaultJobMem, s.o.DefaultJobCPU, 0, nil, ""
 	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
 		if rule.Mem > 0 {
 			r.cost = rule.Mem
 		}
+		if rule.CPU > 0 {
+			r.cpu = rule.CPU
+		}
 		r.pinned = rule.PinnedCores
 		r.devices, r.image = rule.Devices, rule.Image
+	}
+	if r.pinned > 0 {
+		r.cpu = 0
 	}
 }
 
@@ -394,12 +403,12 @@ func (s *Scheduler) updateJob(r *jobRec, j core.Job) {
 	if key() == before {
 		return
 	}
-	old := r.cost
+	old, oldCPU := r.cost, r.cpu
 	s.applyRule(r)
-	if r.cost == old {
+	if r.cost == old && r.cpu == oldCPU {
 		return
 	}
-	s.log.info("job cost updated", "job", r.id, "from", old, "to", r.cost)
+	s.log.info("job cost updated", "job", r.id, "from", old, "to", r.cost, "cpu_from", oldCPU, "cpu_to", r.cpu)
 	if rr := r.rr; rr != nil && rr.full && rr.job == r {
 		_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, r))
 	}
@@ -484,7 +493,7 @@ func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
 	r = s.newJob(lk, j)
 	s.mergePhantom(r)
 	s.enqueue(r)
-	s.log.info("job assigned", "job", r.id, "run", j.RunID, "cost", r.cost, "pinned", r.pinned, "lane", lk.Lane)
+	s.log.info("job assigned", "job", r.id, "run", j.RunID, "cost", r.cost, "cpu", r.cpu, "pinned", r.pinned, "lane", lk.Lane)
 }
 
 // Started handles a JobStarted message: the job is bound to j.RunnerName.
@@ -1254,7 +1263,9 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 // the memory of the VM that StartRunner is about to boot, or nothing.
 func (s *Scheduler) reserveRunner(rec *jobRec, tok string, req admission.Request) (admission.Reservation, string, bool) {
 	vm := s.vmNeed(rec.lane)
-	if !s.led.CanFit(admission.Request{Mem: req.Mem + vm, PinnedCores: req.PinnedCores}) {
+	withVM := req
+	withVM.Mem += vm
+	if !s.led.CanFit(withVM) {
 		return admission.Reservation{}, "", false
 	}
 	res, err := s.led.Reserve(tok, req)
@@ -1478,7 +1489,7 @@ func (s *Scheduler) Snapshot() Status {
 			}
 			js := JobStatus{
 				JobID: r.id, Owner: r.job.Owner, Repo: r.job.Repo, Workflow: admission.WorkflowFile(r.job.WorkflowRef),
-				Name: r.job.Name, RunID: r.job.RunID, State: s.jobState(r), Cost: r.cost, Pinned: r.pinned,
+				Name: r.job.Name, RunID: r.job.RunID, State: s.jobState(r), Cost: r.cost, CPU: r.cpu, Pinned: r.pinned,
 				Age: now.Sub(r.age), Phantom: r.phantom,
 			}
 			if r.rr != nil {
@@ -1566,7 +1577,7 @@ func (s *Scheduler) reconcilePhantoms() {
 			s.seq++
 			id := fmt.Sprintf("phantom-%d", s.seq)
 			r := &jobRec{
-				id: id, lane: l.key, seq: s.seq, phantom: true, cost: s.o.DefaultJobMem,
+				id: id, lane: l.key, seq: s.seq, phantom: true, cost: s.o.DefaultJobMem, cpu: s.o.DefaultJobCPU,
 				age: l.deficitSince, ageKey: "phantom|" + id,
 				job: core.Job{JobID: id, Owner: l.key.Target.Owner, Repo: l.key.Target.Repo, Name: "(unknown)", ScaleSet: l.key.ScaleSetKey},
 			}
