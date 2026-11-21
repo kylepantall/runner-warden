@@ -716,6 +716,33 @@ func (s *Scheduler) reapNow(name string) {
 	s.stop(name)
 }
 
+// DropRun forgets every not-yet-started job of a workflow run that has
+// finished: a job cancelled while queued (or missed across a restart) sends
+// no JobCompleted, and its record would keep asking for runners. A runner
+// already started for one becomes spare. Returns how many were dropped.
+func (s *Scheduler) DropRun(owner, repo string, runID int64) int {
+	n := 0
+	s.locked(func() {
+		for _, rec := range s.sortedJobs() {
+			j := rec.job
+			if j.RunID != runID || rec.phase == pBound || !strings.EqualFold(j.Owner, owner) || !strings.EqualFold(j.Repo, repo) {
+				continue
+			}
+			s.forget(rec)
+			if rr := rec.rr; rr != nil {
+				rr.job, rec.rr = nil, nil
+				s.shrink(rr)
+			}
+			if j.JobID != "" {
+				s.done[j.JobID] = s.now() // a late Assigned must not revive it
+			}
+			s.log.info("job of a finished run dropped", "job", rec.id, "run", runID)
+			n++
+		}
+	})
+	return n
+}
+
 // Drain stops new work: capacity becomes started (no spare slot) and no new
 // runners are started; held jobs stay queued.
 func (s *Scheduler) Drain(on bool) {

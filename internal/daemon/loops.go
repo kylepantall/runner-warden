@@ -267,6 +267,55 @@ func (d *Daemon) staleCheck(ctx context.Context) {
 	}
 }
 
+const (
+	finishedRunsEvery = 2 * time.Minute
+	finishedRunsAfter = 2 * time.Minute // younger waiting jobs are normal
+)
+
+// finishedRunsLoop drops waiting jobs whose workflow run has already
+// finished (see scheduler.DropRun).
+func (d *Daemon) finishedRunsLoop(ctx context.Context) error {
+	t := time.NewTicker(finishedRunsEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+		d.dropFinishedRuns(ctx)
+	}
+}
+
+func (d *Daemon) dropFinishedRuns(ctx context.Context) {
+	type run struct {
+		owner, repo string
+		id          int64
+	}
+	runs := map[run]bool{}
+	for _, l := range d.sched.Snapshot().Lanes {
+		for _, j := range l.Jobs {
+			switch j.State {
+			case scheduler.StateHeld, scheduler.StateStarting, scheduler.StateUnbound:
+			default:
+				continue
+			}
+			if j.RunID != 0 && !j.Phantom && j.Age >= finishedRunsAfter {
+				runs[run{j.Owner, j.Repo, j.RunID}] = true
+			}
+		}
+	}
+	for r := range runs {
+		info, err := d.rest.GetRun(ctx, r.owner, r.repo, r.id)
+		if err != nil || info.Status != "completed" {
+			continue
+		}
+		if n := d.sched.DropRun(r.owner, r.repo, r.id); n > 0 {
+			d.log.Info("dropped jobs of a finished run", "owner", r.owner, "repo", r.repo, "run_id", r.id, "jobs", n)
+		}
+	}
+}
+
 func (d *Daemon) windowsIdleLoop(ctx context.Context) error {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
