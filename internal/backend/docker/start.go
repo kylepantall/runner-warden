@@ -108,7 +108,9 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	if c.RunnerUID > 0 {
 		user = strconv.Itoa(c.RunnerUID)
 	}
-	tmpfs := "mode=1777"
+	// Docker's tmpfs defaults to noexec; jobs routinely run scripts and stub
+	// binaries from /tmp, as they could on a host runner.
+	tmpfs := "exec,mode=1777"
 	if c.TmpfsSize > 0 {
 		tmpfs = "size=" + strconv.FormatInt(c.TmpfsSize, 10) + "," + tmpfs
 	}

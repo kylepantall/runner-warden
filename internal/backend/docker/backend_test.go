@@ -219,7 +219,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 	if len(hc.Devices) != 1 || hc.Devices[0].PathOnHost != "/dev/kvm" {
 		t.Errorf("devices %v", hc.Devices)
 	}
-	if _, ok := hc.Tmpfs["/tmp"]; !ok {
+	if opts, ok := hc.Tmpfs["/tmp"]; !ok || !strings.Contains(opts, "exec") || strings.Contains(opts, "noexec") {
 		t.Error("no /tmp tmpfs")
 	}
 	if cfg.WorkingDir != dir || cfg.Entrypoint[len(cfg.Entrypoint)-1] != dir {

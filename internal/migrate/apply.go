@@ -25,7 +25,7 @@ const (
 
 // DefaultBranchName is the prefix of the branch used in PR mode; each run adds
 // a timestamp so it never reuses a branch someone else may have pre-seeded.
-const DefaultBranchName = "runner-warden/labels"
+const DefaultBranchName = "ci/runner-warden-labels"
 
 // Writer is the REST surface Apply needs (implemented by *gh.REST).
 type Writer interface {
@@ -164,6 +164,20 @@ func applyRepo(ctx context.Context, plan *Plan, r RepoScan, opts ApplyOptions) R
 	}
 	if len(files) == 0 {
 		return rr
+	}
+	// actionlint rejects unknown runs-on labels: declare the new ones where
+	// the repo keeps a self-hosted-runner label list.
+	for _, p := range []string{".github/actionlint.yaml", ".github/actionlint.yml"} {
+		src, _, err := opts.GH.GetFile(ctx, r.Owner, r.Repo, p, r.DefaultBranch)
+		if err != nil {
+			continue
+		}
+		if out, ok := AddActionlintLabels(src, actionlintLabels(plan.Rules.Prefix)); ok {
+			files = append(files, gh.FileChange{Path: p, Content: out})
+			rr.Files = append(rr.Files, p)
+			diffs = append(diffs, unifiedDiff(p, "", string(src), string(out)))
+		}
+		break
 	}
 	switch opts.Mode {
 	case ModePrint:

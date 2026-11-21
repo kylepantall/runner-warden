@@ -40,12 +40,13 @@ func unifiedDiff(name, side, a, b string) string {
 			ops = append(ops, op{' ', al[i], i, j})
 			i++
 			j++
-		case j < m && (i == n || lcs[i][j+1] >= lcs[i+1][j]):
-			ops = append(ops, op{'+', bl[j], i, j})
-			j++
-		default:
+		// Removals before additions, as git and patch expect.
+		case i < n && (j == m || lcs[i+1][j] >= lcs[i][j+1]):
 			ops = append(ops, op{'-', al[i], i, j})
 			i++
+		default:
+			ops = append(ops, op{'+', bl[j], i, j})
+			j++
 		}
 	}
 	const ctx = 3
