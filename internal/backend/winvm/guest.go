@@ -78,6 +78,9 @@ func (j jobPaths) taskCmd() string {
 		`del /f /q "` + j.Cfg() + `"`,
 		`set "RUNNER_TOOL_CACHE=` + j.ToolCache() + `"`,
 		`set "AGENT_TOOLSDIRECTORY=` + j.ToolCache() + `"`,
+		// `shell: bash` must find Git Bash before WSL's System32\bash.exe,
+		// as on GitHub's hosted images.
+		`if exist "%ProgramFiles%\Git\bin\bash.exe" set "PATH=%ProgramFiles%\Git\bin;%PATH%"`,
 		`cd /d "` + j.RunnerDir + `"`,
 		`call "` + winJoin(j.RunnerDir, "run.cmd") + `" > "` + j.Log() + `" 2>&1`,
 	}, "\n")
