@@ -53,3 +53,49 @@ func TestWatchStatusRetriesAndStopsOnCancel(t *testing.T) {
 		t.Fatalf("a failed fetch must not end the watch (calls=%d)", calls.Load())
 	}
 }
+
+func TestFrameRedrawsInPlace(t *testing.T) {
+	f := frame("a\nbbbbbb\nc\nd\ne\n", 4, 3)
+	if !strings.HasPrefix(f, "\x1b[H") || !strings.HasSuffix(f, "\x1b[J") || strings.Contains(f, "\x1b[2J") {
+		t.Fatalf("frame must home and clear below, never clear the whole screen: %q", f)
+	}
+	if strings.Contains(f, "bbbbb") {
+		t.Fatal("lines must be cut to the width, or they wrap and scroll")
+	}
+	if strings.Count(f, "\r\n") != 2 || strings.Contains(f, "\nd") {
+		t.Fatalf("frame must fit the height: %q", f)
+	}
+}
+
+func TestRenderStatusShowsMachines(t *testing.T) {
+	rep := daemon.StatusReport{
+		Hostname:     "box",
+		VMsUp:        map[string]int64{"build": 8 << 30},
+		WindowsVMs:   []string{"build", "spare"},
+		WindowsHosts: map[string]bool{"pc": true},
+		Runners: []daemon.RunnerStatus{
+			{Name: "r-lin", OS: "linux", RunID: 1, Alive: true},
+			{Name: "r-win", OS: "windows", VM: "pc", RunID: 2, Alive: true},
+		},
+		Scheduler: scheduler.Status{Lanes: []scheduler.LaneStatus{
+			{Name: "o/windows/l1", Jobs: []scheduler.JobStatus{{Repo: "app", Name: "w", Runner: "r-win"}}},
+		}},
+	}
+	var b bytes.Buffer
+	renderStatus(&b, rep)
+	out := b.String()
+	for _, want := range []string{"MACHINE", "box", "build", "spare", "pc"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	var jobLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "o/windows/l1") {
+			jobLine = l
+		}
+	}
+	if !strings.Contains(jobLine, " pc ") {
+		t.Fatalf("job row must name the machine its runner is on: %q", jobLine)
+	}
+}

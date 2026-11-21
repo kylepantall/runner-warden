@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -353,11 +354,14 @@ type StatusReport struct {
 	Instance  string           `json:"instance"`
 	Prefix    string           `json:"prefix"`
 	HostID    string           `json:"host_id"`
+	Hostname  string           `json:"hostname,omitempty"` // this machine, where Linux runners run
 	Scheduler scheduler.Status `json:"scheduler"`
 	Runners   []RunnerStatus   `json:"runners"`
 	VMsUp     map[string]int64 `json:"vms_up,omitempty"`
 	// WindowsHosts are remote Windows hosts and whether they answer.
 	WindowsHosts map[string]bool `json:"windows_hosts,omitempty"`
+	// WindowsVMs lists every configured VM, up or not.
+	WindowsVMs []string `json:"windows_vms,omitempty"`
 	// Persistent are containers that outlive runners; their memory counts as
 	// external reservation.
 	Persistent []core.PersistentContainer `json:"persistent,omitempty"`
@@ -391,6 +395,7 @@ func (d *Daemon) handlers() hookapi.Handlers {
 
 func (d *Daemon) status(ctx context.Context) StatusReport {
 	rep := StatusReport{Instance: d.cfg.Instance, Prefix: d.cfg.Prefix, HostID: d.hostID, Scheduler: d.sched.Snapshot()}
+	rep.Hostname, _ = os.Hostname()
 	d.mu.Lock()
 	rs := make([]runnerRec, 0, len(d.runners))
 	for _, r := range d.runners {
@@ -410,6 +415,9 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 	if d.win != nil {
 		rep.VMsUp = d.win.VMsUp()
 		rep.WindowsHosts = d.win.HostsUp()
+		for _, v := range d.cfg.Windows.VMs {
+			rep.WindowsVMs = append(rep.WindowsVMs, v.Name)
+		}
 	}
 	return rep
 }
