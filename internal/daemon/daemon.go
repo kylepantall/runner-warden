@@ -254,6 +254,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	run("monitor", d.monitor)
 	run("reconcile", d.reconcileLoop)
 	run("stale", d.staleLoop)
+	run("finished-runs", d.finishedRunsLoop)
 	if d.win != nil {
 		run("windows-idle", d.windowsIdleLoop)
 	}

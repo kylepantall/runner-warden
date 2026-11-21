@@ -469,3 +469,32 @@ func TestCostReappliedWhenJobDetailsArrive(t *testing.T) {
 		t.Fatalf("ledger still holds the default cost once the job is known: used=%d", used)
 	}
 }
+
+// ---- jobs of a finished run are dropped ----
+
+func TestDropRunForgetsWaitingJobsOnly(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.Budget = 1 * gib }) // room for one runner
+	a, b := lane("a", 1), lane("a", 2)
+	running := h.job("a", "running")
+	waiting := h.job("a", "waiting")
+	waiting.RunID = running.RunID
+	h.begin(a, h.assign(a, running))
+	h.assign(b, waiting)
+	if h.state(waiting.JobID) != StateHeld {
+		t.Fatalf("precondition: second job held, got %s", h.state(waiting.JobID))
+	}
+	if n := h.s.DropRun("A", "R", running.RunID); n != 1 { // owner/repo match case-insensitively
+		t.Fatalf("dropped %d, want only the waiting job", n)
+	}
+	h.wait()
+	if h.state(waiting.JobID) != "" {
+		t.Fatalf("waiting job still tracked: %s", h.state(waiting.JobID))
+	}
+	if h.state(running.JobID) == "" {
+		t.Fatal("a job bound to a runner must not be dropped")
+	}
+	h.assign(b, waiting) // a late Assigned for the dropped job
+	if h.state(waiting.JobID) != "" {
+		t.Fatal("a dropped job must not come back")
+	}
+}
