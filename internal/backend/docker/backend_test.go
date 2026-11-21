@@ -213,8 +213,10 @@ func TestBuildRunnerContainer(t *testing.T) {
 	if hc.Memory != 0 || hc.MemorySwap != 0 {
 		t.Error("runner must not get a memory limit")
 	}
-	if len(hc.GroupAdd) != 1 || hc.GroupAdd[0] != "998" || cfg.User != "1001" {
-		t.Errorf("group/user %v %s", hc.GroupAdd, cfg.User)
+	// PID 1 is root; the runner drops to uid 1001 via setpriv.
+	if len(hc.GroupAdd) != 1 || hc.GroupAdd[0] != "998" || cfg.User != "0" ||
+		len(cfg.Entrypoint) < 2 || cfg.Entrypoint[0] != "/usr/bin/setpriv" || cfg.Entrypoint[1] != "--reuid=1001" {
+		t.Errorf("group/user %v %s %v", hc.GroupAdd, cfg.User, cfg.Entrypoint)
 	}
 	if len(hc.Devices) != 1 || hc.Devices[0].PathOnHost != "/dev/kvm" {
 		t.Errorf("devices %v", hc.Devices)
