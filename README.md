@@ -41,7 +41,7 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | Command | Does |
 |---|---|
 | `setup` | Install or update an instance (idempotent; `--dry-run` shows the plan) |
-| `status` | Lanes, held/running jobs, memory, runners |
+| `status [--once\|--json]` | Live view of lanes, held/running jobs, memory and runners (`--once` / `--json` for a snapshot) |
 | `check` | Health check of service, slice, Docker, disk, daemon |
 | `logs [-f] [runner\|run-id]` | Service logs, filtered |
 | `drain [--off]` | Stop taking new jobs; running jobs finish |
