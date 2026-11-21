@@ -97,3 +97,31 @@ func TestDockerDefaultCgroupParent(t *testing.T) {
 		t.Fatal("expected parse error")
 	}
 }
+
+// Under the service's ProtectSystem=full the unit can't be rewritten: a changed
+// budget is applied at runtime instead of failing the daemon.
+func TestEnsureSliceReadOnlyAppliesRuntime(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	rec := &recorder{}
+	h := Host{Root: root, Run: rec.run}
+	const name = "runner-warden-main.slice"
+	if err := h.EnsureSlice(name, 6<<30, 0); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "etc/systemd/system")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	rec.calls = nil
+	if err := h.EnsureSlice(name, 14<<30, 0); err != nil {
+		t.Fatalf("read-only change: %v", err)
+	}
+	last := rec.calls[len(rec.calls)-1]
+	if len(last) < 4 || last[1] != "set-property" || last[2] != "--runtime" || last[3] != name || last[4] != "MemoryMax=15032385536" {
+		t.Fatalf("calls %v", rec.calls)
+	}
+}

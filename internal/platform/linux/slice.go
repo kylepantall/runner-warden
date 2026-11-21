@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -67,22 +69,51 @@ func (h Host) EnsureSlice(name string, memMax, swapMax int64) error {
 	have, err := os.ReadFile(file) //nolint:gosec // systemd unit path under the host root
 	changed := err != nil || !bytes.Equal(have, want)
 	if changed {
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil { //nolint:gosec // systemd unit dir is world-readable by design
-			return err
-		}
-		tmp := file + ".tmp"
-		if err := os.WriteFile(tmp, want, 0o644); err != nil { //nolint:gosec // systemd unit files are world-readable by design
-			return err
-		}
-		if err := os.Rename(tmp, file); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		if err := h.run(ctx, "systemctl", "daemon-reload"); err != nil {
-			return err
+		werr := h.writeUnit(file, want)
+		if werr == nil {
+			if err := h.run(ctx, "systemctl", "daemon-reload"); err != nil {
+				return err
+			}
+		} else if !errors.Is(werr, fs.ErrPermission) && !errors.Is(werr, syscall.EROFS) || err != nil {
+			// No unit at all and we can't write one: setup has not run.
+			return werr
+		} else {
+			// The service runs with /etc read-only: apply the new limits for
+			// this boot; the next `runner-warden setup` persists them.
+			if err := h.run(ctx, "systemctl", "start", name); err != nil {
+				return err
+			}
+			return h.run(ctx, "systemctl", append([]string{"set-property", "--runtime", name}, sliceProps(memMax, swapMax)...)...)
 		}
 	}
 	return h.run(ctx, "systemctl", "start", name)
+}
+
+func (h Host) writeUnit(file string, want []byte) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil { //nolint:gosec // systemd unit dir is world-readable by design
+		return err
+	}
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, want, 0o644); err != nil { //nolint:gosec // systemd unit files are world-readable by design
+		return err
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// sliceProps are the limits of SliceUnit as systemctl set-property arguments.
+func sliceProps(memMax, swapMax int64) []string {
+	var p []string
+	if memMax > 0 {
+		p = append(p, fmt.Sprintf("MemoryMax=%d", memMax))
+	}
+	if swapMax >= 0 {
+		p = append(p, fmt.Sprintf("MemorySwapMax=%d", swapMax))
+	}
+	return p
 }
 
 // EnsureSlice is Host{}.EnsureSlice on the real host.
