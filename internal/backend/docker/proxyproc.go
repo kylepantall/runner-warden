@@ -142,8 +142,13 @@ func waitForSocket(ctx context.Context, sock string, limit time.Duration) error 
 
 // --- systemd ---
 
-// systemdAvailable is true on a systemd host where transient units can be made.
+// systemdAvailable reports whether proxies can run as transient system units:
+// systemd present and we are root (the daemon always is; unprivileged test
+// runs fall back to in-process proxies).
 func systemdAvailable() bool {
+	if os.Geteuid() != 0 {
+		return false
+	}
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return false
 	}

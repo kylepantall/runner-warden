@@ -76,7 +76,7 @@ func TestIntegrationExecSurvivesDaemonRestart(t *testing.T) {
 		t.Skip("set RW_DOCKER_TESTS=1 to run Docker integration tests")
 	}
 	if !systemdAvailable() {
-		t.Skip("needs systemd (transient units)")
+		t.Skip("needs systemd and root (transient units)")
 	}
 	img := os.Getenv("RW_DOCKER_IMAGE")
 	if img == "" {
