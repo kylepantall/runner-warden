@@ -42,9 +42,15 @@ func TestOEMFilesEmbedded(t *testing.T) {
 		t.Error("public key not written")
 	}
 	bl := Embedded("baseline.ps1")
-	for _, want := range []string{"git-for-windows/git", `\bin`, "jq", "PowerShell/PowerShell", "Inno Setup", "VCTools", "VC.ATL"} {
+	for _, want := range []string{"git-for-windows/git", `\bin`, "jq", "PowerShell/PowerShell", "win-x64.zip", "LongPathsEnabled"} {
 		if !strings.Contains(bl, want) {
 			t.Errorf("baseline lacks %s", want)
+		}
+	}
+	// Project toolchains are not part of the generic baseline.
+	for _, unwanted := range []string{"Inno Setup", "BuildTools", ".msi"} {
+		if strings.Contains(bl, unwanted) {
+			t.Errorf("baseline contains %s", unwanted)
 		}
 	}
 	if len(encodePS("$ErrorActionPreference='Stop'\n"+bl)) > maxEncoded {
