@@ -112,10 +112,10 @@ func TestEnsureSliceReadOnlyAppliesRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "etc/systemd/system")
-	if err := os.Chmod(dir, 0o555); err != nil {
+	if err := os.Chmod(dir, 0o555); err != nil { //nolint:gosec // test makes the unit dir read-only on purpose
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restore the temp dir for cleanup
 	rec.calls = nil
 	if err := h.EnsureSlice(name, 14<<30, 0); err != nil {
 		t.Fatalf("read-only change: %v", err)
