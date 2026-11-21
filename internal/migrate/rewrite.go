@@ -72,7 +72,15 @@ const (
 	FormExpressionJSON Form = "expression_json"
 	FormMatrix         Form = "matrix_value"
 	FormMatrixJSON     Form = "matrix_json"
+	FormInput          Form = "input_value" // with: runs-on: to a reusable workflow
+	FormInputJSON      Form = "input_json"
+	FormInputDefault   Form = "input_default" // workflow_call input default
+	FormInputDefJSON   Form = "input_default_json"
 )
+
+// labelInputs are input names that, by convention, carry runner labels to a
+// reusable workflow (which then uses them in runs-on).
+var labelInputs = []string{"runs-on", "runs_on", "runner", "runners"}
 
 // Change is one replaced span.
 type Change struct {
@@ -134,6 +142,7 @@ func Analyze(src []byte, rules Rules) Result {
 			}
 		}
 	}
+	a.inputDefaults(root)
 	out := a.apply()
 	return Result{Out: out, Changes: a.changes, Skipped: a.skips, Untouched: a.untouched}
 }
@@ -261,12 +270,56 @@ func (a *analyzer) skip(n *yaml.Node, r Reason, text, v string) {
 }
 
 func (a *analyzer) job(name string, j *yaml.Node) {
-	ro := mapGet(j, "runs-on")
-	if ro == nil {
+	a.jobName = name
+	if ro := mapGet(j, "runs-on"); ro != nil {
+		a.runsOn(j, ro)
+	}
+	// A job calling a reusable workflow passes its labels as an input.
+	if mapGet(j, "uses") != nil {
+		if with := mapGet(j, "with"); with != nil && with.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(with.Content); i += 2 {
+				if containsFold(labelInputs, with.Content[i].Value) {
+					a.input(j, with.Content[i+1], FormInput, FormInputJSON)
+				}
+			}
+		}
+	}
+}
+
+// inputDefaults rewrites the defaults of a reusable workflow's label inputs
+// (on.workflow_call.inputs.<runs-on|runner...>.default).
+func (a *analyzer) inputDefaults(root *yaml.Node) {
+	on := mapGet(root, "on")
+	if on == nil {
+		on = mapGet(root, "true") // YAML 1.1 reads a bare `on` key as a bool
+	}
+	inputs := mapGet(mapGet(on, "workflow_call"), "inputs")
+	if inputs == nil || inputs.Kind != yaml.MappingNode {
 		return
 	}
-	a.jobName = name
-	a.runsOn(j, ro)
+	for i := 0; i+1 < len(inputs.Content); i += 2 {
+		if !containsFold(labelInputs, inputs.Content[i].Value) {
+			continue
+		}
+		if d := mapGet(inputs.Content[i+1], "default"); d != nil {
+			a.jobName = "on.workflow_call.inputs." + inputs.Content[i].Value
+			a.input(nil, d, FormInputDefault, FormInputDefJSON)
+		}
+	}
+}
+
+// input rewrites a scalar input value holding labels, a JSON label list, or
+// an expression with label literals.
+func (a *analyzer) input(j, n *yaml.Node, plain, asJSON Form) {
+	if n.Kind != yaml.ScalarNode {
+		a.skip(n, ReasonUnsupportedForm, "", "")
+		return
+	}
+	if strings.Contains(n.Value, "${{") {
+		a.expression(j, n)
+		return
+	}
+	a.labelValue(n, plain, asJSON)
 }
 
 // ---- classification ----
@@ -716,10 +769,16 @@ func (a *analyzer) matrixValue(n *yaml.Node) {
 		a.skip(n, ReasonUnsupportedExpr, n.Value, "")
 		return
 	}
-	labels, form := []string{n.Value}, FormMatrix
+	a.labelValue(n, FormMatrix, FormMatrixJSON)
+}
+
+// labelValue rewrites a literal scalar that holds one label or a JSON label
+// list (kept as JSON: a JSON string of the new label).
+func (a *analyzer) labelValue(n *yaml.Node, plain, jsonForm Form) {
+	labels, form := []string{n.Value}, plain
 	asJSON := false
 	if ls, ok := jsonLabels(n.Value); ok {
-		labels, form, asJSON = ls, FormMatrixJSON, true
+		labels, form, asJSON = ls, jsonForm, true
 	}
 	ours, os, foreign := a.classify(labels)
 	if !ours {

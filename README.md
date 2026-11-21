@@ -47,6 +47,7 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | `drain [--off]` | Stop taking new jobs; running jobs finish |
 | `kill <runner>` | Cancel a runner's job and stop it |
 | `migrate apply\|retire\|rollback` | Label sweep and retirement of old runners |
+| `migrate check [--save]` | Re-scan for jobs still on old labels (e.g. branches older than the sweep); exit 3 if any, so it can run from cron or CI |
 | `windows provision\|adopt <vm>` | Create a Windows VM, or take over an existing dockurr disk |
 | `config validate` | Validate the config |
 | `update [--check]` | Update to the latest release (checksum + signature verified), then restart instances; running jobs survive |

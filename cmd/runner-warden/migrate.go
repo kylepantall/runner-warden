@@ -118,8 +118,66 @@ func migrateCmd() *cobra.Command {
 			return printJSON(cmd, plan)
 		},
 	}
-	c.AddCommand(scan, apply, retire, rollback)
+	var save bool
+	check := &cobra.Command{
+		Use:   "check",
+		Short: "Re-scan every target for runs-on still on old labels (exit 3 if any); read-only",
+		Long: "Re-scans every configured target's workflows on their default branches with the saved " +
+			"plan's rules and lists each runs-on (or label input) that still names an old label, for " +
+			"example from a branch that predates the sweep. Exit status 3 means some were found. " +
+			"--save stores the fresh scan so `migrate apply` covers them.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, plan, rest, err := migrateContext()
+			if err != nil {
+				return err
+			}
+			fresh, err := migrate.Scan(cmd.Context(), migrate.ScanInput{
+				Targets: cfgTargets(cfg), Rules: plan.Rules, GH: rest, Log: newLogger("warn"),
+			})
+			if err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+			left := remainingLabels(fresh)
+			if err := printJSON(cmd, left); err != nil {
+				return err
+			}
+			if save {
+				plan.Repos, plan.Vars = fresh.Repos, fresh.Vars
+				if err := writeJSON(filepath.Join(cfg.StateDir, "setup-plan.json"), plan); err != nil {
+					return err
+				}
+			}
+			if len(left) > 0 {
+				return exitCode(3)
+			}
+			return nil
+		},
+	}
+	check.Flags().BoolVar(&save, "save", false, "store the fresh scan as the plan for `migrate apply`")
+	c.AddCommand(scan, check, apply, retire, rollback)
 	return c
+}
+
+// remainingLabel is one runs-on (or label input) still on an old label.
+type remainingLabel struct {
+	Repo string `json:"repo"`
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Job  string `json:"job"`
+	Old  string `json:"old"`
+	New  string `json:"new"`
+}
+
+func remainingLabels(p *migrate.Plan) []remainingLabel {
+	out := []remainingLabel{}
+	for _, r := range p.Repos {
+		for _, f := range r.Files {
+			for _, c := range f.Changes {
+				out = append(out, remainingLabel{Repo: r.Owner + "/" + r.Repo, File: f.Path, Line: c.Line, Job: c.Job, Old: c.Old, New: c.New})
+			}
+		}
+	}
+	return out
 }
 
 func migrateContext() (cfgT *config.Config, plan *migrate.Plan, rest *gh.REST, err error) {

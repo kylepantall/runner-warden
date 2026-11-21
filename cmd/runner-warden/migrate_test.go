@@ -83,3 +83,17 @@ func TestServiceCommandsTimer(t *testing.T) {
 		}
 	}
 }
+
+func TestRemainingLabelsListsEveryChange(t *testing.T) {
+	p := &migrate.Plan{Repos: []migrate.RepoScan{
+		{Owner: "o", Repo: "a", Files: []migrate.FileScan{{Path: "ci.yml", Changes: []migrate.Change{{Job: "x", Line: 3}, {Job: "y", Line: 9}}}}},
+		{Owner: "o", Repo: "b"},
+	}}
+	got := remainingLabels(p)
+	if len(got) != 2 || got[0].Repo != "o/a" || got[1].Line != 9 {
+		t.Fatalf("%+v", got)
+	}
+	if remainingLabels(&migrate.Plan{}) == nil {
+		t.Fatal("empty result must encode as [] not null")
+	}
+}

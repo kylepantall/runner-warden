@@ -1,0 +1,46 @@
+name: reusable
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: '["self-hosted","general"]'
+      runner:
+        type: string
+        default: ubuntu-latest
+      other:
+        type: string
+        default: '["self-hosted","general"]'
+jobs:
+  json:
+    uses: acme/kit/.github/workflows/guards.yml@main
+    with:
+      runs-on: '["self-hosted","Linux","X64","general"]'
+  plain:
+    uses: ./.github/workflows/build.yml
+    with:
+      runner: kscript
+  win:
+    uses: ./.github/workflows/build.yml
+    with:
+      runs-on: '["self-hosted","isolink-windows"]'
+  expr:
+    uses: ./.github/workflows/build.yml
+    with:
+      runs-on: ${{ github.event.pull_request.head.repo.fork && '"ubuntu-latest"' || '["self-hosted","general"]' }}
+  hosted:
+    uses: ./.github/workflows/build.yml
+    with:
+      runs-on: '["ubuntu-latest"]'
+  migrated:
+    uses: ./.github/workflows/build.yml
+    with:
+      runs-on: '["my-ci-linux"]'
+  notalabel:
+    uses: ./.github/workflows/build.yml
+    with:
+      branch: general
+  self:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    steps:
+      - run: echo
