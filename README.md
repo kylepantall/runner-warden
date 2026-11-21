@@ -47,6 +47,7 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | `migrate apply\|retire\|rollback` | Label sweep and retirement of old runners |
 | `windows provision\|adopt <vm>` | Create a Windows VM, or take over an existing dockurr disk |
 | `config validate` | Validate the config |
+| `uninstall [--purge]` | Stop the service, delete its scale sets, containers, VM containers and slice; `--purge` also removes config, token and state |
 
 ## Configuration
 
