@@ -1,0 +1,39 @@
+name: matrix
+on: [push]
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+          - name: self
+            self-hosted: true
+            runner: '"my-ci-linux"'
+            hosted: ubuntu-latest
+          - name: cloud
+            self-hosted: false
+            runner: '"my-ci-linux"'
+            hosted: ubuntu-latest
+          - name: mac
+            self-hosted: true
+            runner: '["self-hosted","macOS","tart"]'
+            hosted: macos-latest
+    runs-on: ${{ (matrix.self-hosted && true) && fromJSON(matrix.runner) || matrix.hosted }}
+    steps: []
+  dim:
+    strategy:
+      matrix:
+        os: [my-ci-linux, ubuntu-latest]
+        extra: "home-ci"
+    runs-on: ${{ matrix.os }}
+    steps: []
+  dyn:
+    strategy:
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps: []
+  dq:
+    strategy:
+      matrix:
+        runner: ["\"my-ci-linux\""]
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    steps: []

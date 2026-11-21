@@ -1,0 +1,40 @@
+version: 2
+project_name: runner-warden
+builds:
+  - id: runner-warden
+    main: ./cmd/runner-warden
+    binary: runner-warden
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+archives:
+  - formats: [tar.gz]
+    files: [LICENSE, README.md, packaging/systemd/*]
+checksum:
+  name_template: checksums.txt
+sboms:
+  - artifacts: archive
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args: ["sign-blob", "--output-certificate=${certificate}", "--output-signature=${signature}", "${artifact}", "--yes"]
+    artifacts: checksum
+nfpms:
+  - package_name: runner-warden
+    vendor: runner-warden
+    homepage: https://github.com/kylepantall/runner-warden
+    maintainer: runner-warden maintainers
+    description: Autoscaling manager for self-hosted GitHub Actions runners
+    license: Apache-2.0
+    formats: [deb, rpm]
+    bindir: /usr/local/bin
+    contents:
+      - src: packaging/systemd/runner-warden@.service
+        dst: /lib/systemd/system/runner-warden@.service
+changelog:
+  sort: asc

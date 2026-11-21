@@ -1,0 +1,53 @@
+# header comment stays
+name: forms   # trailing comment
+on: [push]
+x-runner: &anchor home-ci
+jobs:
+  flow4:
+    runs-on: [self-hosted, Linux, X64, general]   # keep me
+    steps:
+      - run: echo é
+  flow2:
+    runs-on: [self-hosted, general]
+    steps: []
+  plain:
+    runs-on: home-ci
+    steps: []
+  quoted:
+    runs-on: "home-ci"
+    steps: []
+  windows:
+    runs-on: [self-hosted, isolink-windows]
+    steps: []
+  mac:
+    runs-on: [self-hosted, macOS, tart]
+    steps: []
+  block:
+    runs-on:
+      - self-hosted
+      - Linux
+      - general
+    steps: []
+  mapping:
+    runs-on:
+      group: ci-group
+      labels: [self-hosted, general]
+    steps: []
+  grouponly:
+    runs-on:
+      group: ci-group
+    steps: []
+  hosted:
+    runs-on: ubuntu-latest
+    steps: []
+  hostedwin:
+    runs-on: windows-latest
+    steps: []
+  alias:
+    runs-on: *anchor
+    steps: []
+  migrated:
+    runs-on: my-ci-linux
+    steps: []
+  reusable:
+    uses: ./.github/workflows/other.yml
