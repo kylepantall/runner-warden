@@ -86,7 +86,10 @@ type Proxy struct {
 	resumeCh chan struct{} // closed when pauses drops to 0; non-nil while paused
 	inflight int
 	owned    map[string]ownedEntry
-	closed   chan struct{}
+	// containerJobNets are job networks that have a job container (see
+	// services.go).
+	containerJobNets map[string]bool
+	closed           chan struct{}
 	once     sync.Once
 }
 
@@ -332,6 +335,9 @@ func (p *Proxy) rewrite(w http.ResponseWriter, r *http.Request, kind string) (in
 	}
 	doc["Labels"] = p.stampLabels(doc["Labels"], role)
 	if kind == "containers" {
+		if role == roleJob && !p.noteJobContainer(doc) && p.shareRunnerNetwork(doc) {
+			p.log.Info("service container shares the runner network", "runner", p.cfg.Runner)
+		}
 		p.rewriteContainer(doc)
 	}
 	out, err := json.Marshal(doc)
