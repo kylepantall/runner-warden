@@ -19,6 +19,7 @@ import (
 
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/kylepantall/runner-warden/internal/daemon"
 	"github.com/kylepantall/runner-warden/internal/scheduler"
@@ -76,8 +77,10 @@ func watchStatus(ctx context.Context, out io.Writer, every time.Duration, fetch 
 	if every < 200*time.Millisecond {
 		every = 200 * time.Millisecond
 	}
-	fmt.Fprint(out, "\x1b[?25l") // hide the cursor while redrawing
-	defer fmt.Fprint(out, "\x1b[?25h\n")
+	// The alternate screen (as top and watch use) keeps frames out of the
+	// scrollback; each frame overwrites the last in place.
+	fmt.Fprint(out, "\x1b[?1049h\x1b[?25l")
+	defer fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -88,14 +91,60 @@ func watchStatus(ctx context.Context, out io.Writer, every time.Duration, fetch 
 		} else {
 			renderStatus(&buf, rep)
 		}
-		fmt.Fprint(out, "\x1b[H\x1b[2J")
-		_, _ = out.Write(buf.Bytes())
+		w, h := termSize()
+		_, _ = io.WriteString(out, frame(buf.String(), w, h))
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
 		}
 	}
+}
+
+// termSize is the terminal's width and height, 0 when unknown.
+var termSize = func() (int, int) {
+	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		return 0, 0
+	}
+	return int(ws.Col), int(ws.Row)
+}
+
+// frame turns text into one in-place redraw: cursor home, every line cut to
+// the width and cleared to its end, then the rest of the screen cleared.
+// Lines past the height are dropped (a frame that scrolls would smear), with
+// a note saying how many.
+func frame(text string, width, height int) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if height > 1 && len(lines) > height {
+		hidden := len(lines) - height + 1
+		lines = append(lines[:height-1], fmt.Sprintf("… %d more lines: enlarge the window, or use --once", hidden))
+	}
+	var b strings.Builder
+	b.WriteString("\x1b[H")
+	for i, l := range lines {
+		if width > 0 {
+			if r := []rune(l); len(r) > width {
+				l = string(r[:width])
+			}
+		}
+		b.WriteString(l)
+		b.WriteString("\x1b[K")
+		if i < len(lines)-1 {
+			b.WriteString("\r\n")
+		}
+	}
+	b.WriteString("\x1b[J")
+	return b.String()
+}
+
+// machineOf names where a runner runs: this host for Linux, the VM or host
+// for Windows.
+func machineOf(rep daemon.StatusReport, r daemon.RunnerStatus) string {
+	if r.OS == "windows" {
+		return dash(r.VM)
+	}
+	return dash(rep.Hostname)
 }
 
 // renderStatus prints the status tables. Lanes without jobs are summarised
@@ -111,16 +160,39 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 		fmt.Fprintf(out, "cpu      %s\n", l)
 	}
 	fmt.Fprintf(out, "jobs     %d held, %d parked · %d runners\n", s.Held, s.Parked, s.Runners)
-	for vm, mem := range rep.VMsUp {
-		fmt.Fprintf(out, "windows  vm %s up (%s reserved)\n", vm, size(mem))
+
+	busyOn := map[string]int{}
+	machine := map[string]string{} // runner -> machine
+	for _, r := range rep.Runners {
+		m := machineOf(rep, r)
+		machine[r.Name] = m
+		if r.RunID != 0 {
+			busyOn[m]++
+		}
+	}
+	fmt.Fprintln(out)
+	mw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(mw, "MACHINE\tKIND\tSTATE\tRESERVED\tJOBS")
+	fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", dash(rep.Hostname), "this host", "up", size(s.Ledger.Reserved)+" of "+size(s.Ledger.Budget), busyOn[dash(rep.Hostname)])
+	vms := rep.WindowsVMs
+	if len(vms) == 0 { // daemon older than the client
+		vms = slices.Sorted(maps.Keys(rep.VMsUp))
+	}
+	for _, vm := range vms {
+		state, reserved := "stopped", "-"
+		if mem, up := rep.VMsUp[vm]; up {
+			state, reserved = "up", size(mem)
+		}
+		fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", vm, "windows vm", state, reserved, busyOn[vm])
 	}
 	for _, h := range slices.Sorted(maps.Keys(rep.WindowsHosts)) {
 		state := "reachable"
 		if !rep.WindowsHosts[h] {
 			state = "UNREACHABLE"
 		}
-		fmt.Fprintf(out, "windows  host %s %s\n", h, state)
+		fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", h, "windows host", state, "-", busyOn[h])
 	}
+	_ = mw.Flush()
 
 	idle := 0
 	var busy []scheduler.LaneStatus
@@ -136,14 +208,14 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 		fmt.Fprintf(out, "no jobs (%d idle lanes)\n", idle)
 	} else {
 		w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "LANE\tJOB\tSTATE\tCOST\tAGE\tRUNNER")
+		fmt.Fprintln(w, "LANE\tJOB\tSTATE\tCOST\tAGE\tMACHINE\tRUNNER")
 		for _, l := range busy {
 			for _, j := range l.Jobs {
 				name := j.Repo + "/" + j.Workflow + " " + j.Name
 				if j.Phantom {
 					name = j.Repo + " (not yet known)"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", l.Name, name, j.State, jobCost(j), j.Age.Truncate(time.Second), dash(j.Runner))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", l.Name, name, j.State, jobCost(j), j.Age.Truncate(time.Second), dash(machine[j.Runner]), dash(j.Runner))
 			}
 		}
 		_ = w.Flush()
@@ -155,7 +227,7 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 	if len(rep.Runners) > 0 {
 		fmt.Fprintln(out)
 		w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "RUNNER\tTARGET\tOS\tSTATE\tMEM\tPEAK\tOOM\tUP")
+		fmt.Fprintln(w, "RUNNER\tMACHINE\tTARGET\tOS\tSTATE\tMEM\tPEAK\tOOM\tUP")
 		rs := append([]daemon.RunnerStatus(nil), rep.Runners...)
 		sort.Slice(rs, func(i, j int) bool { return rs[i].Started.Before(rs[j].Started) })
 		for _, r := range rs {
@@ -166,7 +238,7 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 			if !r.Alive {
 				state = "exited"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", r.Name, r.Target, r.OS, state,
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", r.Name, machineOf(rep, r), r.Target, r.OS, state,
 				size(r.Mem), size(r.MemPeak), r.OOM, time.Since(r.Started).Truncate(time.Second))
 		}
 		_ = w.Flush()

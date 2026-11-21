@@ -617,6 +617,9 @@ func (d *Daemon) restore(ctx context.Context) error {
 			d.log.Error("hook socket for adopted runner failed", "runner", r.Name, "error", err.Error())
 		}
 		rr := &runnerRec{name: r.Name, lane: lane, ghID: r.GitHubRunnerID, handle: h, started: r.Created, activeAt: time.Now()}
+		if lane.OS == core.Windows {
+			rr.vm = h.BackendID // the VM or host the runner sits on
+		}
 		var job *core.Job
 		if r.JobRunID != 0 {
 			owner, repo, _ := strings.Cut(r.JobRepo, "/")
