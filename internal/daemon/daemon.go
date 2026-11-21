@@ -290,8 +290,7 @@ func (d *Daemon) ensureScaleSets(ctx context.Context) error {
 	for _, l := range d.lanes {
 		set := d.sets[l.Lane-1]
 		name := naming.LaneName(d.cfg.Prefix, l.OS, l.Lane)
-		label := naming.Label(d.cfg.Prefix, l.OS)
-		if _, err := set.Ensure(ctx, l.ScaleSetKey, name, []string{label}, l.Target.RunnerGroup); err != nil {
+		if _, err := set.Ensure(ctx, l.ScaleSetKey, name, naming.LaneLabels(d.cfg.Prefix, l.OS), l.Target.RunnerGroup); err != nil {
 			return fmt.Errorf("scale set %s for %s: %w", name, l.Target, err)
 		}
 		lane := l

@@ -81,7 +81,7 @@ func deleteScaleSets(ctx context.Context, cfg *config.Config, token string, out 
 			for _, os := range t.OSes() {
 				key := core.ScaleSetKey{Target: t.Core(), OS: os}
 				name := naming.LaneName(cfg.Prefix, os, n)
-				if _, err := sets.Ensure(ctx, key, name, []string{naming.Label(cfg.Prefix, os)}, key.Target.RunnerGroup); err != nil {
+				if _, err := sets.Ensure(ctx, key, name, naming.LaneLabels(cfg.Prefix, os), key.Target.RunnerGroup); err != nil {
 					fmt.Fprintf(out, "⚠️  %s %s: %v\n", key.Target, name, err)
 					continue
 				}

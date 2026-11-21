@@ -30,7 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/kylepantall/runner-warden/main/pack
 sudo runner-warden setup --prefix my-ci --org my-org --repo me/tool
 ```
 
-Then change workflows to `runs-on: my-ci-linux` (setup opens a PR per repo for you).
+Then change workflows to `runs-on: my-ci-linux` (setup opens a PR per repo for you). `runs-on: my-ci` also works for Linux.
+
+`runner-warden` is a single binary in `/usr/local/bin`: `runner-warden --help` lists every command, and `sudo runner-warden update` keeps it current.
 
 Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user with `repo` (+ `admin:org` for orgs, `workflow` for the label sweep).
 
@@ -47,6 +49,7 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | `migrate apply\|retire\|rollback` | Label sweep and retirement of old runners |
 | `windows provision\|adopt <vm>` | Create a Windows VM, or take over an existing dockurr disk |
 | `config validate` | Validate the config |
+| `update [--check]` | Update to the latest release (checksum + signature verified), then restart instances; running jobs survive |
 | `uninstall [--purge]` | Stop the service, delete its scale sets, containers, VM containers and slice; `--purge` also removes config, token and state |
 
 ## Configuration
