@@ -197,6 +197,7 @@ func New(o Options) (*Daemon, error) {
 	} else {
 		o.Log.Warn("cpu topology unavailable; pinning disabled", "error", err.Error())
 	}
+	so.CPUBudget = admission.CPUBudget(c.Limits.CPUBudget, so.Cores, so.ReservedCPUs)
 	d.sched = scheduler.New(so)
 	uid := c.Linux.RunnerUID
 	if uid <= 0 {

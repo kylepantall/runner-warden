@@ -709,3 +709,27 @@ func TestOptionsDefaults(t *testing.T) {
 		t.Fatalf("%+v", o)
 	}
 }
+
+func TestCPUBudgetHoldsJobsThatDoNotFit(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.CPUBudget, o.DefaultJobCPU = 4000, 2000
+		o.Costs = []admission.Rule{{Match: "a/r/ci.yml/heavy", Mem: gib, CPU: 3000}}
+	})
+	l1, l2 := lane("a", 1), lane("a", 2)
+	heavy := h.assign(l1, h.job("a", "heavy"))
+	if _, ok := h.startsFor(heavy.JobID); !ok {
+		t.Fatal("heavy job not started on an idle host")
+	}
+	light := h.assign(l2, h.job("a", "light"))
+	if _, ok := h.startsFor(light.JobID); ok || h.state(light.JobID) != StateHeld {
+		t.Fatalf("2 cpus started with 1 free: state=%s", h.state(light.JobID))
+	}
+	if got := h.s.Snapshot().Ledger.CPUReserved; got != 3000 {
+		t.Fatalf("reserved=%d", got)
+	}
+	r := h.begin(l1, heavy)
+	h.done(l1, heavy, r, "succeeded")
+	if _, ok := h.startsFor(light.JobID); !ok {
+		t.Fatal("held job not started once CPU freed")
+	}
+}
