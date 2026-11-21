@@ -21,8 +21,8 @@ sboms:
   - artifacts: archive
 signs:
   - cmd: cosign
-    certificate: "${artifact}.pem"
-    args: ["sign-blob", "--output-certificate=${certificate}", "--output-signature=${signature}", "${artifact}", "--yes"]
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
     artifacts: checksum
 nfpms:
   - package_name: runner-warden
