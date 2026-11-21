@@ -344,7 +344,7 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 	b := testBackend(t, &fakeAPI{})
 	g := b.PullGate()
 	g.Pause()
-	if err := b.startProxy(testRunner, b.proxySock(testRunner)); err != nil {
+	if err := b.startProxy(context.Background(), testRunner, b.proxySock(testRunner)); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = b.Cleanup(context.Background(), testRunner) }()

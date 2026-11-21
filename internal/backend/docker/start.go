@@ -15,7 +15,6 @@ import (
 	"github.com/docker/docker/api/types/network"
 
 	"github.com/kylepantall/runner-warden/internal/core"
-	"github.com/kylepantall/runner-warden/internal/dockerproxy"
 	"github.com/kylepantall/runner-warden/internal/naming"
 )
 
@@ -218,7 +217,7 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 		return core.Handle{}, err
 	}
 	cfg, hc := b.buildRunnerContainer(spec, dir, sock, gid)
-	if err := b.startProxy(spec.Name, sock, b.allowedFromBinds(spec.Name, hc.Binds)...); err != nil {
+	if err := b.startProxy(ctx, spec.Name, sock, b.allowedFromBinds(spec.Name, hc.Binds)...); err != nil {
 		_ = b.Cleanup(ctx, spec.Name)
 		return core.Handle{}, err
 	}
@@ -231,30 +230,4 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 		return core.Handle{}, fmt.Errorf("start runner: %w", err)
 	}
 	return core.Handle{RunnerName: spec.Name, BackendID: created.ID, StartedAt: time.Now()}, nil
-}
-
-func (b *Backend) startProxy(runner, sock string, allowed ...string) error {
-	if err := mkdirAll(filepath.Dir(sock)); err != nil {
-		return err
-	}
-	p, err := dockerproxy.New(dockerproxy.Config{
-		Socket: sock, Upstream: b.cfg.DockerSocket,
-		Runner: runner, Instance: b.cfg.Instance, HostID: b.cfg.HostID,
-		Slice: b.cfg.Slice, OOMScoreAdj: b.cfg.OOMScoreAdj,
-		CacheBinds: b.cfg.CacheBinds, CacheEnv: b.cfg.CacheEnv, AllowedBinds: allowed, PersistentNames: b.cfg.PersistentNames,
-		Log: b.log,
-	})
-	if err != nil {
-		return err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if old := b.proxies[runner]; old != nil {
-		_ = old.Close()
-	}
-	for i := 0; i < b.paused; i++ {
-		p.PausePulls()
-	}
-	b.proxies[runner] = p
-	return nil
 }

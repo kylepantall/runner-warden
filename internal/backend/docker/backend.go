@@ -62,6 +62,9 @@ type Config struct {
 	// create as persistent containers (see dockerproxy.Config).
 	PersistentNames []string
 
+	// LogLevel is the slog level the out-of-process proxies log at ("" = info).
+	LogLevel string
+
 	Log *slog.Logger
 }
 
@@ -98,6 +101,11 @@ type Backend struct {
 	paused  int
 	stats   map[string]*runnerStats
 	cgPaths map[string]string
+
+	// launcher runs each runner's proxy as its own process, outside the
+	// daemon, so a daemon restart does not cut running jobs. nil = serve the
+	// proxies in-process (no systemd, tests).
+	launcher proxyLauncher
 }
 
 var _ core.Backend = (*Backend)(nil)
@@ -111,7 +119,14 @@ func New(cfg Config) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newBackend(cfg, cli)
+	b, err := newBackend(cfg, cli)
+	if err != nil {
+		return nil, err
+	}
+	if systemdAvailable() {
+		b.launcher = systemdLauncher{exe: cfg.HookBinary}
+	}
+	return b, nil
 }
 
 func newBackend(cfg Config, api dockerAPI) (*Backend, error) {
@@ -147,6 +162,9 @@ func (b *Backend) hookDir(n string) string { return filepath.Join(b.cfg.HookDir,
 
 func (b *Backend) runnersDir() string        { return filepath.Join(b.cfg.StateDir, "runners") }
 func (b *Backend) runnerDir(n string) string { return filepath.Join(b.runnersDir(), n) }
+
+// PullLockPath is the file proxies and image GC use to exclude each other.
+func PullLockPath(stateDir string) string { return filepath.Join(stateDir, "runners", ".pull.lock") }
 
 // proxySock lives inside the runner dir, which is bind-mounted as a directory:
 // the runner keeps reaching a re-created socket after a daemon restart (a
@@ -287,8 +305,10 @@ func (g poolGate) InFlight() int {
 	return n
 }
 
-// Adopt restarts the runner's Docker proxy after a daemon restart, on the same
-// socket path inside the runner dir, so the adopted runner keeps its Docker.
+// Adopt makes sure the runner's Docker proxy is up after a daemon restart. An
+// out-of-process proxy normally survived and is left alone; a dead one (or an
+// in-process one) is started again on the same socket path inside the runner
+// dir, so the adopted runner keeps its Docker.
 func (b *Backend) Adopt(ctx context.Context, h core.Handle) error {
 	if !b.validName(h.RunnerName) {
 		return errors.New("invalid runner name")
@@ -303,7 +323,11 @@ func (b *Backend) Adopt(ctx context.Context, h core.Handle) error {
 			binds = ci.HostConfig.Binds
 		}
 	}
-	return b.startProxy(h.RunnerName, b.proxySock(h.RunnerName), b.allowedFromBinds(h.RunnerName, binds)...)
+	sock := b.proxySock(h.RunnerName)
+	if b.launcher != nil && proxyAlive(sock) {
+		return nil // the proxy outlived the daemon; nothing to do
+	}
+	return b.startProxy(ctx, h.RunnerName, sock, b.allowedFromBinds(h.RunnerName, binds)...)
 }
 
 // allowedFromBinds is the set of host paths a job may mount: the runner dir,

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/naming"
+	"github.com/kylepantall/runner-warden/internal/pulllock"
 )
 
 // DefaultMaxBody bounds the request bodies the proxy buffers for rewriting.
@@ -43,27 +44,32 @@ var (
 	deniedPath = regexp.MustCompile(`^(/v[0-9.]+)?/(swarm|services|tasks|plugins|secrets|configs|nodes)(/|$)`)
 )
 
-// Config configures one proxy.
+// Config configures one proxy. The JSON form is the on-disk spec read by the
+// out-of-process proxy (see Spec).
 type Config struct {
-	Socket      string            // unix socket the proxy listens on
-	Upstream    string            // real Docker socket
-	Runner      string            // runner name stamped on everything
-	Instance    string            // instance stamped on everything
-	HostID      string            // host id stamped on everything
-	Slice       string            // HostConfig.CgroupParent for job containers
-	OOMScoreAdj int               // HostConfig.OomScoreAdj for job containers
-	CacheBinds  []string          // "host:container[:opts]" appended to job containers
-	CacheEnv    map[string]string // env appended to job containers
+	Socket      string            `json:"socket"`        // unix socket the proxy listens on
+	Upstream    string            `json:"upstream"`      // real Docker socket
+	Runner      string            `json:"runner"`        // runner name stamped on everything
+	Instance    string            `json:"instance"`      // instance stamped on everything
+	HostID      string            `json:"host_id"`       // host id stamped on everything
+	Slice       string            `json:"slice"`         // HostConfig.CgroupParent for job containers
+	OOMScoreAdj int               `json:"oom_score_adj"` // HostConfig.OomScoreAdj for job containers
+	CacheBinds  []string          `json:"cache_binds"`   // "host:container[:opts]" appended to job containers
+	CacheEnv    map[string]string `json:"cache_env"`     // env appended to job containers
 	// AllowedBinds are host paths (and everything under them) a job may
 	// bind-mount; anything else outside named volumes is refused.
-	AllowedBinds []string
+	AllowedBinds []string `json:"allowed_binds"`
 	// PersistentNames are path.Match globs on container names. A container
 	// created with a matching ?name= is labelled role=persistent without a
 	// runner: it survives runner cleanup and every runner of the instance
 	// may use it.
-	PersistentNames []string
-	MaxBody         int64        // 0 = DefaultMaxBody
-	Log             *slog.Logger // nil = discard
+	PersistentNames []string `json:"persistent_names"`
+	// PullLock, when set, is the cross-process pull lock file (see package
+	// pulllock): image pulls and builds hold it shared so image GC, in the
+	// daemon, can exclude them.
+	PullLock string       `json:"pull_lock"`
+	MaxBody  int64        `json:"max_body"` // 0 = DefaultMaxBody
+	Log      *slog.Logger `json:"-"`        // nil = discard
 }
 
 // Proxy is a running per-runner proxy.
@@ -75,6 +81,7 @@ type Proxy struct {
 	up  *http.Client // inspect calls to the real daemon
 
 	mu       sync.Mutex
+	pulls    *pulllock.Lock // nil = in-process gate only
 	pauses   int
 	resumeCh chan struct{} // closed when pauses drops to 0; non-nil while paused
 	inflight int
@@ -105,6 +112,9 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, err
 	}
 	p := &Proxy{cfg: cfg, log: log, closed: make(chan struct{})}
+	if cfg.PullLock != "" {
+		p.pulls = pulllock.New(cfg.PullLock)
+	}
 	upstream := cfg.Upstream
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", upstream)
@@ -170,13 +180,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), status)
 				return
 			}
-		} else if pullPath.MatchString(r.URL.Path) {
-			if !p.beginPull(r.Context()) {
-				http.Error(w, "proxy closing", http.StatusServiceUnavailable)
-				return
-			}
-			defer p.endPull()
 		}
+	}
+	// Builds count as pulls: a FROM may pull, and a prune mid-build would
+	// remove the base it just fetched.
+	if r.Method == http.MethodPost && (pullPath.MatchString(r.URL.Path) || buildPath.MatchString(r.URL.Path)) {
+		release, ok := p.beginPull(r.Context())
+		if !ok {
+			http.Error(w, "proxy closing", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
 	}
 	p.rp.ServeHTTP(w, r)
 }
@@ -229,7 +243,42 @@ func (g Gate) Resume() { g.p.ResumePulls() }
 // InFlight is the number of pulls in progress.
 func (g Gate) InFlight() int { return g.p.InFlightPulls() }
 
-func (p *Proxy) beginPull(ctx context.Context) bool {
+// beginPull waits out in-process pauses, then the cross-process lock, and
+// returns the function that ends the pull.
+func (p *Proxy) beginPull(ctx context.Context) (func(), bool) {
+	if !p.beginLocal(ctx) {
+		return nil, false
+	}
+	if p.pulls == nil {
+		return p.endPull, true
+	}
+	lctx, cancel := p.lockCtx(ctx)
+	defer cancel()
+	f, err := p.pulls.RLock(lctx)
+	if err != nil {
+		p.endPull()
+		if ctx.Err() == nil {
+			p.log.Warn("pull lock unavailable", "runner", p.cfg.Runner, "error", err.Error())
+		}
+		return nil, false
+	}
+	return func() { f.Close(); p.endPull() }, true
+}
+
+// lockCtx is ctx that also ends when the proxy closes.
+func (p *Proxy) lockCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	c, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-p.closed:
+			cancel()
+		case <-c.Done():
+		}
+	}()
+	return c, cancel
+}
+
+func (p *Proxy) beginLocal(ctx context.Context) bool {
 	for {
 		p.mu.Lock()
 		ch := p.resumeCh

@@ -19,6 +19,7 @@ import (
 	"github.com/kylepantall/runner-warden/internal/imagegc"
 	"github.com/kylepantall/runner-warden/internal/naming"
 	"github.com/kylepantall/runner-warden/internal/platform/linux"
+	"github.com/kylepantall/runner-warden/internal/pulllock"
 )
 
 func daemonCmd() *cobra.Command {
@@ -73,6 +74,7 @@ func daemonCmd() *cobra.Command {
 							PersistentNames: cfg.Linux.PersistentNames,
 							CacheBinds:      binds,
 							CacheEnv:        env,
+							LogLevel:        cfg.LogLevel,
 							Log:             log.With("backend", "linux"),
 						})
 						if err != nil {
@@ -83,9 +85,11 @@ func daemonCmd() *cobra.Command {
 						if err != nil {
 							return nil, nil, err
 						}
+						// In-process proxies (no systemd) pause through the backend;
+						// out-of-process ones through the shared lock file.
 						gc, err := imagegc.New(imagegc.Config{
 							Docker:        dc,
-							Gates:         []imagegc.PullGate{b.PullGate()},
+							Gates:         []imagegc.PullGate{b.PullGate(), pulllock.NewGate(pulllock.New(docker.PullLockPath(cfg.StateDir)))},
 							HighWatermark: cfg.ImageGC.HighWatermark,
 							Interval:      cfg.ImageGC.Interval.D(),
 							UnusedFor:     cfg.ImageGC.UnusedFor.D(),

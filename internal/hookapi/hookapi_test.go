@@ -337,3 +337,33 @@ func TestRunnerHookStopRemovesSocketAndRejectsBadNames(t *testing.T) {
 		t.Fatal("runner hook dir not removed")
 	}
 }
+
+// A daemon restart leaves the hook socket down for about 15s; the job-started
+// hook must keep retrying through that, then get the daemon's verdict.
+func TestRunHookWaitsOutADaemonRestartWindow(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "restart.sock")
+	h := Handlers{Hook: func(context.Context, scheduler.HookRequest) (scheduler.HookResponse, error) {
+		return scheduler.HookResponse{Allow: false, Reason: "no"}, nil
+	}}
+	now := time.Unix(0, 0)
+	up := now.Add(15 * time.Second)
+	started := false
+	o := HookOptions{
+		Now: func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) {
+			now = now.Add(d)
+			if !started && !now.Before(up) {
+				started = true
+				ln, err := net.Listen("unix", sock)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				go func() { _ = Serve(ctx, NewHookServer(h), ln) }()
+			}
+		},
+	}
+	if code := RunHook(context.Background(), KindJobStarted, env(map[string]string{EnvSocket: sock}), &bytes.Buffer{}, o); code != 1 {
+		t.Fatalf("hook gave up (failed open) inside the restart window, code=%d", code)
+	}
+}
