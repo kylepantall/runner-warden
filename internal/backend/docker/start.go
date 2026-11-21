@@ -104,10 +104,15 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	}
 	binds = append(binds, c.CacheBinds...)
 
-	user := "runner"
+	// PID 1 (docker-init) runs as root, like init on a host or VM; the runner
+	// itself drops to the runner user. Tests that probe /proc/1 or other
+	// root-owned state then behave as they do on a host runner.
+	uid := "1001"
 	if c.RunnerUID > 0 {
-		user = strconv.Itoa(c.RunnerUID)
+		uid = strconv.Itoa(c.RunnerUID)
 	}
+	env["HOME"] = "/home/runner"
+	env["USER"] = "runner"
 	// Docker's tmpfs defaults to noexec; jobs routinely run scripts and stub
 	// binaries from /tmp, as they could on a host runner.
 	tmpfs := "exec,mode=1777"
@@ -131,10 +136,11 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 	}
 	cfg := &container.Config{
 		Image:      img,
-		User:       user,
+		User:       "0",
 		Env:        sortedEnv(env),
 		WorkingDir: dir,
-		Entrypoint: []string{"/bin/sh", "-c", entrypoint, "runner-warden", dir},
+		Entrypoint: []string{"/usr/bin/setpriv", "--reuid=" + uid, "--regid=" + uid, "--init-groups",
+			"/bin/sh", "-c", entrypoint, "runner-warden", dir},
 		Labels: map[string]string{
 			naming.MetaManaged:  "1",
 			naming.MetaInstance: c.Instance,
