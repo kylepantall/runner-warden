@@ -57,6 +57,11 @@ type jobPaths struct {
 func (j jobPaths) Dir() string        { return winJoin(j.WorkRoot, j.Runner) }
 func (j jobPaths) WorkFolder() string { return winJoin(j.Dir(), "_work") }
 func (j jobPaths) Cfg() string        { return winJoin(j.Dir(), "jit.cfg") }
+
+// ToolCache outlives jobs (no .rw-job marker, so the sweep keeps it): tools
+// installed via the tool cache (Flutter, NuGet, setup-* actions) stay warm, as
+// on a long-lived runner. One job runs per VM, so nothing shares it at once.
+func (j jobPaths) ToolCache() string { return winJoin(j.WorkRoot, "_tool") }
 func (j jobPaths) Cmd() string        { return winJoin(j.Dir(), "run-task.cmd") }
 func (j jobPaths) Log() string        { return winJoin(j.Dir(), "runner.log") }
 func (j jobPaths) Diag() string       { return winJoin(j.RunnerDir, "_diag") }
@@ -71,6 +76,8 @@ func (j jobPaths) taskCmd() string {
 		"setlocal DisableDelayedExpansion",
 		`for /f "usebackq delims=" %%a in ("` + j.Cfg() + `") do set "ACTIONS_RUNNER_INPUT_JITCONFIG=%%a"`,
 		`del /f /q "` + j.Cfg() + `"`,
+		`set "RUNNER_TOOL_CACHE=` + j.ToolCache() + `"`,
+		`set "AGENT_TOOLSDIRECTORY=` + j.ToolCache() + `"`,
 		`cd /d "` + j.RunnerDir + `"`,
 		`call "` + winJoin(j.RunnerDir, "run.cmd") + `" > "` + j.Log() + `" 2>&1`,
 	}, "\n")
@@ -102,6 +109,7 @@ foreach ($p in @(Get-Process -Name 'Runner.Listener','Runner.Worker' -ErrorActio
 if (Test-Path $root) { Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $name -and (Test-Path (Join-Path $_.FullName '.rw-job')) } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } }
 foreach ($f in '.runner','.credentials','.credentials_rsaparams') { Remove-Item (Join-Path $rd $f) -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path ` + psq(j.WorkFolder()) + ` | Out-Null
+New-Item -ItemType Directory -Force -Path ` + psq(j.ToolCache()) + ` | Out-Null
 New-Item -ItemType File -Force -Path (Join-Path $dir '.rw-job') | Out-Null
 $cfg=[Console]::In.ReadToEnd().Trim()
 if (-not $cfg) { throw 'empty jit config' }
