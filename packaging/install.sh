@@ -42,10 +42,9 @@ curl -fsSL -o "$TMP/$ARCHIVE" "$BASE/$ARCHIVE"
 curl -fsSL -o "$TMP/checksums.txt" "$BASE/checksums.txt"
 # Authenticity: checksums.txt is signed keylessly by the release workflow.
 if command -v cosign >/dev/null 2>&1; then
-  curl -fsSL -o "$TMP/checksums.txt.pem" "$BASE/checksums.txt.pem"
-  curl -fsSL -o "$TMP/checksums.txt.sig" "$BASE/checksums.txt.sig"
+  curl -fsSL -o "$TMP/checksums.txt.sigstore.json" "$BASE/checksums.txt.sigstore.json"
   cosign verify-blob \
-    --certificate "$TMP/checksums.txt.pem" --signature "$TMP/checksums.txt.sig" \
+    --bundle "$TMP/checksums.txt.sigstore.json" \
     --certificate-identity-regexp "^https://github.com/$REPO/\.github/workflows/release\.yml@refs/tags/v" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     "$TMP/checksums.txt" >/dev/null 2>&1 || fail "signature verification failed"
