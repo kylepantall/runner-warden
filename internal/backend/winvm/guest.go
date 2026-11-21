@@ -57,15 +57,15 @@ type jobPaths struct {
 func (j jobPaths) Dir() string        { return winJoin(j.WorkRoot, j.Runner) }
 func (j jobPaths) WorkFolder() string { return winJoin(j.Dir(), "_work") }
 func (j jobPaths) Cfg() string        { return winJoin(j.Dir(), "jit.cfg") }
+func (j jobPaths) Cmd() string        { return winJoin(j.Dir(), "run-task.cmd") }
+func (j jobPaths) Log() string        { return winJoin(j.Dir(), "runner.log") }
+func (j jobPaths) Diag() string       { return winJoin(j.RunnerDir, "_diag") }
+func (j jobPaths) Task() string       { return TaskName(j.Runner) }
 
 // ToolCache outlives jobs (no .rw-job marker, so the sweep keeps it): tools
 // installed via the tool cache (Flutter, NuGet, setup-* actions) stay warm, as
 // on a long-lived runner. One job runs per VM, so nothing shares it at once.
 func (j jobPaths) ToolCache() string { return winJoin(j.WorkRoot, "_tool") }
-func (j jobPaths) Cmd() string        { return winJoin(j.Dir(), "run-task.cmd") }
-func (j jobPaths) Log() string        { return winJoin(j.Dir(), "runner.log") }
-func (j jobPaths) Diag() string       { return winJoin(j.RunnerDir, "_diag") }
-func (j jobPaths) Task() string       { return TaskName(j.Runner) }
 
 // taskCmd is run-task.cmd. The JIT config is read from its file into the
 // runner's own input variable (no command-line length limit, nothing in a
