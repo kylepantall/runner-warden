@@ -16,13 +16,14 @@ type Rule struct {
 	Mem         int64
 	PinnedCores int
 	Devices     []string
+	Image       string
 }
 
 // RulesFromConfig converts config [[cost]] entries, keeping their order.
 func RulesFromConfig(cs []config.Cost) []Rule {
 	out := make([]Rule, len(cs))
 	for i, c := range cs {
-		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, Devices: c.Devices}
+		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, Devices: c.Devices, Image: c.Image}
 	}
 	return out
 }

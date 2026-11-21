@@ -26,6 +26,7 @@ import (
 	"github.com/kylepantall/runner-warden/internal/core"
 	"github.com/kylepantall/runner-warden/internal/dockerproxy"
 	"github.com/kylepantall/runner-warden/internal/naming"
+	"github.com/kylepantall/runner-warden/internal/pulllock"
 )
 
 // Config configures the backend.
@@ -106,6 +107,8 @@ type Backend struct {
 	// daemon, so a daemon restart does not cut running jobs. nil = serve the
 	// proxies in-process (no systemd, tests).
 	launcher proxyLauncher
+
+	pulled sync.Map // per-job image ref → time.Time of the last pull
 }
 
 var _ core.Backend = (*Backend)(nil)
@@ -196,6 +199,55 @@ func (b *Backend) Prepare(ctx context.Context) error {
 		return fmt.Errorf("pull %s: %w", b.cfg.Image, err)
 	}
 	return nil
+}
+
+// jobImageRefresh is how often EnsureImage re-pulls a per-job image that is
+// already present, so moving tags are picked up.
+const jobImageRefresh = time.Hour
+
+// EnsureImage makes a per-job runner image available: it pulls when the image
+// is missing or was last pulled over an hour ago, and tolerates a failed
+// refresh when a local copy exists. Pulls hold the shared pull lock so image
+// GC never runs mid-pull.
+func (b *Backend) EnsureImage(ctx context.Context, ref string) error {
+	if ref == b.cfg.Image {
+		return nil
+	}
+	_, ierr := b.api.ImageInspect(ctx, ref)
+	if t, ok := b.pulled.Load(ref); ok && ierr == nil && time.Since(t.(time.Time)) < jobImageRefresh {
+		return nil
+	}
+	err := b.pull(ctx, ref)
+	if err == nil {
+		b.pulled.Store(ref, time.Now())
+		return nil
+	}
+	if ierr == nil {
+		b.log.Warn("job image pull failed, using local copy", "image", ref, "error", err.Error())
+		b.pulled.Store(ref, time.Now())
+		return nil
+	}
+	return fmt.Errorf("pull %s: %w", ref, err)
+}
+
+func (b *Backend) pull(ctx context.Context, ref string) error {
+	if b.cfg.StateDir != "" {
+		if err := mkdirAll(b.runnersDir()); err != nil {
+			return err
+		}
+		l, err := pulllock.New(PullLockPath(b.cfg.StateDir)).RLock(ctx)
+		if err != nil {
+			return err
+		}
+		defer l.Close()
+	}
+	rc, err := b.api.ImagePull(ctx, ref, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rc.Close() }()
+	_, err = io.Copy(io.Discard, rc)
+	return err
 }
 
 func (b *Backend) labelFilter(runner string) filters.Args {

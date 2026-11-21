@@ -21,6 +21,7 @@ image = "ghcr.io/kylepantall/runner-warden-runner:latest"  # runner + docker com
 runner_uid = 1001
 tmpfs_size = "8GiB"              # /tmp in runner containers
 persistent_names = ["my-device-*"]  # containers jobs create with a matching name outlive the runner
+allowed_images = ["ghcr.io/my-org/*"]  # images repos may pick in .github/runner-warden.yml; empty = off
 
 [[cache]]                        # shared host dirs, mounted into runners and job containers
 name = "pub"
@@ -33,6 +34,8 @@ dir_mode = "2775"
 match = "my-org/app/ci.yml/maestro*"
 mem = "15GiB"
 pinned_cores = 3                 # optional: whole physical cores, SMT siblings together
+devices = ["/dev/kvm"]           # optional: host devices for matching jobs
+image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file)
 
 [hang]
 idle = "30m"                     # no CPU, IO or job output
@@ -80,6 +83,36 @@ targets = ["my-org", "me/tool"]  # empty = any Windows target
 | Small, fast jobs | Leave them at or below `light_threshold` so they overtake held heavy jobs |
 
 The slice's `MemoryMax` is the backstop: a job that exceeds its estimate is OOM-killed (reported in `status` and logs) instead of the host freezing.
+
+## Per-project runner images
+
+Keep the default image lean; projects that need more ship their own image built `FROM` it.
+
+```dockerfile
+FROM ghcr.io/kylepantall/runner-warden-runner:v0.1.4
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk && rm -rf /var/lib/apt/lists/*
+```
+
+The repo picks it in `.github/runner-warden.yml`:
+
+```yaml
+image: ghcr.io/my-org/app-ci:1        # every job in this repo
+jobs:                                  # first match wins; workflow-file/job-name globs
+  - match: ci.yml/android*
+    image: ghcr.io/my-org/android-ci:1
+```
+
+| Rule | Detail |
+|---|---|
+| Precedence | `[[cost]] image` → repo file → `linux.image` |
+| Allowlist | Repo images are used only if they match `linux.allowed_images` (`*` stops at `/`); empty list = repo file ignored |
+| Which file | Read from the workflow's ref (a PR can change it), cached 1 min; reusable workflows from another repo read the default branch |
+| Pulls | Anonymous, when missing or last pulled over 1h ago. Same ref = one local copy; images sharing a base share its layers. For private registries, `docker pull` on the host first (a local copy is used when a pull fails) |
+| Failure | Missing, invalid or disallowed file, or an image that cannot be pulled → default image, logged |
+| Base | The image must keep the runner, `setpriv` and uid 1001 from the base |
+
+⚠️ The image follows the job the runner was started for. If GitHub hands that runner a different job (rare), it runs in the first job's image.
 
 ## Persistent containers
 

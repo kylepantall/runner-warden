@@ -115,6 +115,10 @@ type Linux struct {
 	// creates a container with a matching name gets one that outlives the
 	// runner and stays reachable from every runner of this instance.
 	PersistentNames []string `toml:"persistent_names"`
+	// AllowedImages are path.Match globs on image refs. A repo may pick its
+	// runner image in .github/runner-warden.yml only when the image matches
+	// one; empty disables repo-chosen images.
+	AllowedImages []string `toml:"allowed_images"`
 }
 
 // Windows configures the Windows VM backend.
@@ -200,6 +204,9 @@ type Cost struct {
 	Mem         Size     `toml:"mem"`
 	PinnedCores int      `toml:"pinned_cores"`
 	Devices     []string `toml:"devices"`
+	// Image replaces the runner image for matching jobs (Linux). It must be
+	// built FROM the default runner image.
+	Image string `toml:"image"`
 }
 
 // Target is an org or repo that runners serve.
@@ -406,6 +413,13 @@ func (c *Config) Validate() error {
 	for _, p := range c.Linux.AllowedBinds {
 		if !strings.HasPrefix(p, "/") || path.Clean(p) == "/" {
 			add("linux.allowed_binds %q: use an absolute path other than /", p)
+		}
+	}
+	for _, p := range c.Linux.AllowedImages {
+		if p == "" {
+			add("linux.allowed_images: empty pattern")
+		} else if _, err := path.Match(p, ""); err != nil {
+			add("linux.allowed_images %q: %v", p, err)
 		}
 	}
 	for _, p := range c.Linux.PersistentNames {

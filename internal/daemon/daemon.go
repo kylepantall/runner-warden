@@ -35,6 +35,7 @@ type Daemon struct {
 
 	sets     []*gh.ScaleSets // one per lane index: a ScaleSets keeps one set per key
 	rest     githubAPI
+	confs    repoConfs
 	backends map[core.OS]core.Backend
 	win      WindowsPool // nil unless windows is enabled
 	sched    *scheduler.Scheduler
@@ -395,7 +396,19 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		ScaleSet: l.ScaleSetKey,
 		MemBytes: g.MemBytes,
 		CPUSet:   g.CPUSet,
+		Devices:  g.Devices,
 		Env:      map[string]string{},
+	}
+	if l.OS == core.Linux {
+		if img := d.runnerImage(ctx, g); img != "" {
+			if ie, ok := b.(imageEnsurer); ok {
+				if err := ie.EnsureImage(ctx, img); err != nil {
+					d.log.Warn("job image unavailable, using default", "image", img, "error", err.Error())
+				} else {
+					spec.Image = img
+				}
+			}
+		}
 	}
 	var vm string
 	if l.OS == core.Windows {
@@ -458,7 +471,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	d.mu.Lock()
 	d.runners[name] = rr
 	d.mu.Unlock()
-	d.log.Info("runner started", "runner", name, "lane", l.Lane, "target", l.Target.String(), "os", string(l.OS), "mem", g.MemBytes, "parked", g.Parked, "cpuset", g.CPUSet)
+	d.log.Info("runner started", "runner", name, "lane", l.Lane, "target", l.Target.String(), "os", string(l.OS), "mem", g.MemBytes, "parked", g.Parked, "cpuset", g.CPUSet, "image", spec.Image)
 	return name, nil
 }
 
