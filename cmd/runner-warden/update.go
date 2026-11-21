@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kylepantall/runner-warden/internal/assets"
 	"github.com/kylepantall/runner-warden/internal/config"
 )
 
@@ -144,7 +144,7 @@ func refreshUnits(ctx context.Context, units map[string][]byte, out io.Writer) e
 	changed := false
 	for name, content := range units {
 		p := filepath.Join(systemdDir, name)
-		if cur, err := os.ReadFile(p); err == nil && bytes.Equal(cur, content) { //nolint:gosec // names checked by validUnitName
+		if cur, err := os.ReadFile(p); err == nil && bytes.Equal(cur, content) { //nolint:gosec // names are assets.Units keys
 			continue
 		}
 		if err := replaceFile(p, content, 0o644); err != nil {
@@ -209,15 +209,22 @@ func fetchRelease(ctx context.Context, ver string, requireSig bool, out io.Write
 			if bin, err = io.ReadAll(io.LimitReader(tr, maxArchive)); err != nil {
 				return nil, nil, err
 			}
-		case h.Typeflag == tar.TypeReg && path.Dir(name) == "packaging/systemd" && validUnitName(path.Base(name)):
-			b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
-			if err != nil {
-				return nil, nil, err
+		case h.Typeflag == tar.TypeReg:
+			// Only units this binary knows: the key comes from assets, never
+			// from the archive, so nothing can be written elsewhere.
+			for known := range assets.Units {
+				if name != "packaging/systemd/"+known {
+					continue
+				}
+				b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
+				if err != nil {
+					return nil, nil, err
+				}
+				if units == nil {
+					units = map[string][]byte{}
+				}
+				units[known] = b
 			}
-			if units == nil {
-				units = map[string][]byte{}
-			}
-			units[path.Base(name)] = b
 		}
 	}
 	if len(bin) == 0 {
@@ -261,15 +268,6 @@ func verifySignature(ctx context.Context, base string, sums []byte, require bool
 	}
 	fmt.Fprintln(out, "✅ signature verified")
 	return nil
-}
-
-// validUnitName accepts only runner-warden's own unit file names, so a
-// release archive can never write elsewhere under /etc/systemd/system.
-func validUnitName(n string) bool {
-	if !strings.HasPrefix(n, "runner-warden") || strings.ContainsAny(n, "/\\") {
-		return false
-	}
-	return strings.HasSuffix(n, ".service") || strings.HasSuffix(n, ".timer")
 }
 
 // replaceFile writes next to dst and renames over it, so a running binary
