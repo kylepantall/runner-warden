@@ -241,3 +241,43 @@ func TestMatrixExcludeAndOtherRefs(t *testing.T) {
 		t.Fatalf("%+v", res.Skipped)
 	}
 }
+
+func TestGoldenReusableInputs(t *testing.T) {
+	res, _ := golden(t, "inputs")
+	for job, want := range map[string]struct {
+		form Form
+		new  string
+		os   core.OS
+	}{
+		"json":                            {FormInputJSON, `'"my-ci-linux"'`, core.Linux},
+		"plain":                           {FormInput, "my-ci-linux", core.Linux},
+		"win":                             {FormInputJSON, `'"my-ci-windows"'`, core.Windows},
+		"expr":                            {FormExpressionJSON, `'"my-ci-linux"'`, core.Linux},
+		"on.workflow_call.inputs.runs-on": {FormInputDefJSON, `'"my-ci-linux"'`, core.Linux},
+	} {
+		c := changeFor(res, job)
+		if len(c) != 1 || c[0].Form != want.form || c[0].New != want.new || c[0].OS != want.os {
+			t.Errorf("%s: %+v", job, c)
+		}
+	}
+	// Hosted, already migrated, non-label inputs and inputs not named like
+	// runner labels are left alone.
+	for _, job := range []string{"hosted", "migrated", "notalabel", "self", "on.workflow_call.inputs.runner", "on.workflow_call.inputs.other"} {
+		if c := changeFor(res, job); len(c) != 0 {
+			t.Errorf("%s must not change: %+v", job, c)
+		}
+	}
+	if again := Analyze(res.Out, testRules); len(again.Changes) != 0 {
+		t.Errorf("not idempotent: %+v", again.Changes)
+	}
+}
+
+func TestReusableInputDefaultsOnNonBareHostAreForeign(t *testing.T) {
+	rules := testRules
+	rules.BareHost = false
+	in := []byte("jobs:\n  g:\n    uses: ./x.yml\n    with:\n      runs-on: '[\"self-hosted\",\"Linux\",\"X64\"]'\n")
+	res := Analyze(in, rules)
+	if len(res.Changes) != 0 || len(res.Skipped) != 1 || res.Skipped[0].Reason != ReasonForeignLabels {
+		t.Fatalf("defaults-only labels must not move off a bare host: %+v %+v", res.Changes, res.Skipped)
+	}
+}
