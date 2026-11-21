@@ -108,11 +108,16 @@ func TestProvisionFlow(t *testing.T) {
 		}
 		last = idx
 	}
-	// Existing disk: refuse, use adopt.
 	if err := os.MkdirAll(v.StorageDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(v.StorageDir, "data.img"), nil, 0o600)
+	// Our own disk (password recorded): a re-run resumes.
+	if err := f.pool.Provision(ctx, "a", ""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	// A disk we did not install: refuse, use adopt.
+	_ = os.Remove(f.pool.passwordFile("a"))
 	if err := f.pool.Provision(ctx, "a", ""); !errors.Is(err, ErrStorageNotEmpty) {
 		t.Fatalf("got %v", err)
 	}

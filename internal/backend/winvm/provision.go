@@ -91,30 +91,38 @@ func (p *Pool) Provision(ctx context.Context, vm, userScript string) error {
 	if err != nil {
 		return err
 	}
+	// A disk we installed ourselves (our password file exists) resumes after
+	// an interrupted or failed run; any other disk must be adopted.
+	resume := false
 	if _, err := os.Stat(filepath.Join(v.StorageDir, "data.img")); err == nil {
-		return ErrStorageNotEmpty
+		if p.readPassword(vm) == "" {
+			return ErrStorageNotEmpty
+		}
+		resume = true
 	}
-	_, pub, err := EnsureKey(p.cfg.Windows.SSHKeyFile)
-	if err != nil {
-		return err
-	}
-	if err := OEMFiles(v.OEMDir, pub); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(p.vmStateDir(vm), 0o700); err != nil {
-		return err
-	}
-	pw := p.readPassword(vm)
-	if pw == "" {
-		if pw, err = randomPassword(); err != nil {
+	if !resume {
+		_, pub, err := EnsureKey(p.cfg.Windows.SSHKeyFile)
+		if err != nil {
+			return err
+		}
+		if err := OEMFiles(v.OEMDir, pub); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(p.vmStateDir(vm), 0o700); err != nil {
+			return err
+		}
+		pw, err := randomPassword()
+		if err != nil {
 			return err
 		}
 		if err := os.WriteFile(p.passwordFile(vm), []byte(pw+"\n"), 0o600); err != nil {
 			return err
 		}
+		_ = os.Remove(p.knownHosts(vm)) // a fresh install has a new host key
+		p.log.Info("provisioning windows vm, install takes 20-40 minutes", "vm", vm)
+	} else {
+		p.log.Info("resuming provisioning of windows vm", "vm", vm)
 	}
-	_ = os.Remove(p.knownHosts(vm)) // a fresh install has a new host key
-	p.log.Info("provisioning windows vm, install takes 20-40 minutes", "vm", vm)
 	if err := p.ensureUp(ctx, vm, provisionSSHWait); err != nil {
 		return err
 	}
