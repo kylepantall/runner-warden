@@ -113,7 +113,7 @@ $cmd=@'
 '@
 [IO.File]::WriteAllText(` + psq(j.Cmd()) + `, ([string]::Join([Environment]::NewLine, ($cmd -split "\r?\n")) + [Environment]::NewLine))
 $a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c "' + ` + psq(j.Cmd()) + ` + '"')
-$p=New-ScheduledTaskPrincipal -UserId ("$($env:USERDOMAIN)\$($env:USERNAME)") -LogonType ` + logon + ` -RunLevel Highest
+$p=New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType ` + logon + ` -RunLevel Highest
 $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName ` + psq(j.Task()) + ` -Action $a -Principal $p -Settings $s -Force | Out-Null
 Start-ScheduledTask -TaskName ` + psq(j.Task()) + `

@@ -147,6 +147,7 @@ func (p *Pool) Provision(ctx context.Context, vm, userScript string) error {
 			return fmt.Errorf("user script: %w", err)
 		}
 	}
+	p.log.Info("windows vm provisioned", "vm", vm)
 	return nil
 }
 
