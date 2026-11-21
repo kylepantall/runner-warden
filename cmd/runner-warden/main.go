@@ -38,7 +38,7 @@ func main() {
 	root.PersistentFlags().StringVar(&instanceFlag, "instance", "", "instance name (default: the only configured instance)")
 	root.AddCommand(
 		versionCmd(), daemonCmd(), hookCmd(), statusCmd(), drainCmd(), killCmd(), logsCmd(), checkCmd(),
-		setupCmd(), migrateCmd(), configCmd(), windowsCmd(), uninstallCmd(),
+		setupCmd(), migrateCmd(), configCmd(), windowsCmd(), uninstallCmd(), updateCmd(),
 	)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

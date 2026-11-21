@@ -56,6 +56,15 @@ func ValidatePrefix(p string) error {
 // Label is the runs-on label (and scale-set name) for an OS.
 func Label(prefix string, os core.OS) string { return prefix + "-" + string(os) }
 
+// LaneLabels are the labels every lane of an OS carries: the OS label, and
+// for Linux also the bare prefix (so `runs-on: <prefix>` keeps working).
+func LaneLabels(prefix string, os core.OS) []string {
+	if os == core.Linux {
+		return []string{Label(prefix, os), prefix}
+	}
+	return []string{Label(prefix, os)}
+}
+
 // LaneName is the scale-set name of lane n (1-based) for an OS. Every lane
 // carries Label(prefix, os) as an extra label, so workflows only use that.
 func LaneName(prefix string, os core.OS, n int) string {

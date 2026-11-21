@@ -29,10 +29,10 @@ import (
 )
 
 type setupOpts struct {
-	prefix, budget, sweep, runnerGroup string
-	orgs, repos, legacy, windowsLabels []string
-	tokenStdin, yes, dryRun, retire    bool
-	updateVars, allowPublic            bool
+	prefix, budget, sweep, runnerGroup       string
+	orgs, repos, legacy, windowsLabels, oses []string
+	tokenStdin, yes, dryRun, retire          bool
+	updateVars, allowPublic                  bool
 }
 
 func setupCmd() *cobra.Command {
@@ -57,6 +57,7 @@ func setupCmd() *cobra.Command {
 	f.StringVar(&o.prefix, "prefix", "", "naming prefix, e.g. my-ci (required on first run)")
 	f.StringSliceVar(&o.orgs, "org", nil, "org to serve at org level (repeatable)")
 	f.StringSliceVar(&o.repos, "repo", nil, "owner/name repo to serve (repeatable)")
+	f.StringSliceVar(&o.oses, "os", []string{"linux"}, "operating systems to serve for the given targets: linux, windows")
 	f.StringVar(&o.runnerGroup, "runner-group", "", "org runner group (default: Default)")
 	f.StringVar(&o.budget, "memory-budget", "", "memory for all jobs, e.g. 22GiB (default: detected)")
 	f.BoolVar(&o.tokenStdin, "token-stdin", false, "read the GitHub token from stdin instead of `gh auth token`")
@@ -130,17 +131,17 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 
 	// Targets.
 	for _, org := range o.orgs {
-		addTarget(cfg, config.Target{Org: org, RunnerGroup: o.runnerGroup})
+		addTarget(cfg, config.Target{Org: org, RunnerGroup: o.runnerGroup, OS: o.oses})
 	}
 	for _, r := range o.repos {
-		addTarget(cfg, config.Target{Repo: r})
+		addTarget(cfg, config.Target{Repo: r, OS: o.oses})
 	}
 	if len(cfg.Targets) == 0 && interactive {
 		for _, s := range splitList(prompt(out, in, "Orgs to serve (comma separated, blank for none)")) {
-			addTarget(cfg, config.Target{Org: s, RunnerGroup: o.runnerGroup})
+			addTarget(cfg, config.Target{Org: s, RunnerGroup: o.runnerGroup, OS: o.oses})
 		}
 		for _, s := range splitList(prompt(out, in, "Repos to serve as owner/name (comma separated, blank for none)")) {
-			addTarget(cfg, config.Target{Repo: s})
+			addTarget(cfg, config.Target{Repo: s, OS: o.oses})
 		}
 	}
 	if len(cfg.Targets) == 0 {
