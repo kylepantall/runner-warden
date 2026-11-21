@@ -111,6 +111,10 @@ type Linux struct {
 	// AllowedBinds are host paths (absolute, not "/") jobs may bind-mount
 	// beyond the runner dir and the cache paths.
 	AllowedBinds []string `toml:"allowed_binds"`
+	// PersistentNames are path.Match globs on container names. A job that
+	// creates a container with a matching name gets one that outlives the
+	// runner and stays reachable from every runner of this instance.
+	PersistentNames []string `toml:"persistent_names"`
 }
 
 // Windows configures the Windows VM backend.
@@ -402,6 +406,13 @@ func (c *Config) Validate() error {
 	for _, p := range c.Linux.AllowedBinds {
 		if !strings.HasPrefix(p, "/") || path.Clean(p) == "/" {
 			add("linux.allowed_binds %q: use an absolute path other than /", p)
+		}
+	}
+	for _, p := range c.Linux.PersistentNames {
+		if p == "" {
+			add("linux.persistent_names: empty pattern")
+		} else if _, err := path.Match(p, ""); err != nil {
+			add("linux.persistent_names %q: %v", p, err)
 		}
 	}
 	if c.Limits.Lanes < 0 || c.Limits.MaxParked < 0 {

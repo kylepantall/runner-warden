@@ -295,3 +295,40 @@ func TestEventsOutliveFirstJobAndExpire(t *testing.T) {
 		t.Fatal("expired event kept")
 	}
 }
+
+type persistentBackend struct {
+	*fakeBackend
+	cs  []core.PersistentContainer
+	err error
+}
+
+func (p *persistentBackend) Persistent(context.Context) ([]core.PersistentContainer, error) {
+	return p.cs, p.err
+}
+
+func TestPersistentMemoryIsReservedExternally(t *testing.T) {
+	pb := &persistentBackend{fakeBackend: &fakeBackend{alive: true}, cs: []core.PersistentContainer{{Name: "dev-1", Mem: 300}, {Name: "dev-2", Mem: 200}}}
+	d := testDaemon(t, pb.fakeBackend, &fakeAPI{})
+	d.backends[core.Linux] = pb
+	d.cfg.Limits.ExternalReserved = 1000
+
+	d.reservePersistent(context.Background())
+	if got := d.sched.Snapshot().Ledger.External; got != 1500 {
+		t.Fatalf("external %d", got)
+	}
+	if got := len(d.status(context.Background()).Persistent); got != 2 {
+		t.Fatalf("status persistent %d", got)
+	}
+
+	// A container going away frees its share; a failed sample changes nothing.
+	pb.cs = pb.cs[:1]
+	d.reservePersistent(context.Background())
+	if got := d.sched.Snapshot().Ledger.External; got != 1300 {
+		t.Fatalf("external %d", got)
+	}
+	pb.err = errors.New("boom")
+	d.reservePersistent(context.Background())
+	if got := d.sched.Snapshot().Ledger.External; got != 1300 {
+		t.Fatalf("external after failed sample %d", got)
+	}
+}

@@ -49,6 +49,7 @@ type Daemon struct {
 	starting  map[string]bool    // runner names being started: not orphans yet
 	events    map[int64]eventRec // run id -> event name, for stale-PR checks
 	evPruned  time.Time
+	persist   []core.PersistentContainer // last sample, for status
 }
 
 // eventRec remembers a run's event; entries expire (a run's first job
@@ -77,6 +78,12 @@ type githubAPI interface {
 // proxy) lives in the daemon process and must be rebuilt for adopted runners.
 type adopter interface {
 	Adopt(ctx context.Context, h core.Handle) error
+}
+
+// persistentReporter is implemented by backends whose jobs can leave
+// containers behind on purpose (outside the ledger, but inside the slice).
+type persistentReporter interface {
+	Persistent(ctx context.Context) ([]core.PersistentContainer, error)
 }
 
 type runnerRec struct {

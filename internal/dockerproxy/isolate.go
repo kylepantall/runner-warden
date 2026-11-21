@@ -10,8 +10,11 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kylepantall/runner-warden/internal/naming"
 )
 
 // Routes that need isolation. The daemon is shared by every runner, so a job
@@ -24,7 +27,9 @@ var (
 	volumePath    = regexp.MustCompile(`^(/v[0-9.]+)?/volumes/([^/]+)(/.*)?$`)
 	commitPath    = regexp.MustCompile(`^(/v[0-9.]+)?/commit$`)
 	listPath      = regexp.MustCompile(`^(/v[0-9.]+)?/(containers/json|volumes|networks)$`)
-	prunePath     = regexp.MustCompile(`^(/v[0-9.]+)?/(containers|volumes|networks|images)/prune$`)
+	// containerListPath is listPath's container case, post-filtered by the proxy.
+	containerListPath = regexp.MustCompile(`^(/v[0-9.]+)?/containers/json$`)
+	prunePath         = regexp.MustCompile(`^(/v[0-9.]+)?/(containers|volumes|networks|images)/prune$`)
 )
 
 const ownedCacheTTL = 5 * time.Second
@@ -39,7 +44,13 @@ type ownedEntry struct {
 func (p *Proxy) authorize(r *http.Request) (int, error) {
 	pth := r.URL.Path
 	if listPath.MatchString(pth) && r.Method == http.MethodGet || prunePath.MatchString(pth) && r.Method == http.MethodPost {
-		if err := p.scopeFilters(r); err != nil {
+		labels := p.Labels()
+		if containerListPath.MatchString(pth) {
+			// Filters cannot OR labels: ask for the whole instance and let
+			// serveContainerList keep what this runner may see.
+			labels = map[string]string{naming.MetaManaged: "1", naming.MetaInstance: p.cfg.Instance}
+		}
+		if err := p.scopeFilters(r, labels); err != nil {
 			return http.StatusBadRequest, err
 		}
 		return 0, nil
@@ -73,8 +84,8 @@ func (p *Proxy) authorize(r *http.Request) (int, error) {
 	return 0, nil
 }
 
-// scopeFilters ANDs this runner's job labels into the request's filters.
-func (p *Proxy) scopeFilters(r *http.Request) error {
+// scopeFilters ANDs the given labels into the request's filters.
+func (p *Proxy) scopeFilters(r *http.Request, labels map[string]string) error {
 	q := r.URL.Query()
 	f := map[string][]string{}
 	if raw := q.Get("filters"); raw != "" {
@@ -93,7 +104,7 @@ func (p *Proxy) scopeFilters(r *http.Request) error {
 			}
 		}
 	}
-	for k, v := range p.Labels() {
+	for k, v := range labels {
 		f["label"] = append(f["label"], k+"="+v)
 	}
 	out, err := json.Marshal(f)
@@ -105,14 +116,83 @@ func (p *Proxy) scopeFilters(r *http.Request) error {
 	return nil
 }
 
-// ownsLabels reports whether labels mark a job resource of this runner.
-func (p *Proxy) ownsLabels(l map[string]string) bool {
+// ownsLabels reports whether labels mark a job resource of this runner, or
+// (containers only) a persistent container of this instance.
+func (p *Proxy) ownsLabels(kind string, l map[string]string) bool {
+	if kind == "containers" && l[naming.MetaRole] == rolePersistent &&
+		l[naming.MetaManaged] == "1" && l[naming.MetaInstance] == p.cfg.Instance {
+		return true
+	}
 	for k, v := range p.Labels() {
 		if l[k] != v {
 			return false
 		}
 	}
 	return true
+}
+
+// maxListBody bounds the container list the proxy buffers to post-filter.
+const maxListBody = 32 << 20
+
+// serveContainerList answers GET /containers/json with only the containers
+// this runner may use: its own jobs plus the instance's persistent ones.
+func (p *Proxy) serveContainerList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit > 0 {
+		// Applied after filtering, or other runners' containers would eat it.
+		q.Del("limit")
+		r.URL.RawQuery = q.Encode()
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+r.URL.RequestURI(), nil) //nolint:gosec // local docker socket upstream, path built by the proxy
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	resp, err := p.up.Do(req) //nolint:gosec // upstream is the local docker socket
+	if err != nil {
+		p.log.Warn("proxy upstream error", "runner", p.cfg.Runner, "error", err.Error())
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxListBody+1))
+	if err != nil || len(body) > maxListBody {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	if resp.StatusCode == http.StatusOK {
+		var items []json.RawMessage
+		if err := json.Unmarshal(body, &items); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		kept := make([]json.RawMessage, 0, len(items))
+		for _, it := range items {
+			var s struct{ Labels map[string]string }
+			if json.Unmarshal(it, &s) == nil && p.ownsLabels("containers", s.Labels) {
+				kept = append(kept, it)
+			}
+		}
+		if limit > 0 && len(kept) > limit {
+			kept = kept[:limit]
+		}
+		if body, err = json.Marshal(kept); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+	for k, vs := range resp.Header {
+		if k == "Content-Length" || k == "Content-Encoding" {
+			continue
+		}
+		w.Header()[k] = vs
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
 }
 
 func (p *Proxy) requireOwned(ctx context.Context, kind, id string) (int, error) {
@@ -185,7 +265,7 @@ func (p *Proxy) inspectOwned(ctx context.Context, kind, id string) (bool, error)
 	if kind == "containers" {
 		labels = doc.Config.Labels
 	}
-	return p.ownsLabels(labels), nil
+	return p.ownsLabels(kind, labels), nil
 }
 
 func (p *Proxy) execContainer(ctx context.Context, id string) (string, error) {

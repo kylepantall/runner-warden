@@ -511,7 +511,12 @@ func TestListAndPruneAreScopedToRunner(t *testing.T) {
 		for _, l := range f["label"] {
 			have[l] = true
 		}
-		for k, v := range p.Labels() {
+		want := p.Labels()
+		if strings.HasPrefix(c.path, "/containers/json") {
+			// Instance-wide: the proxy post-filters the list itself.
+			want = map[string]string{naming.MetaManaged: "1", naming.MetaInstance: "inst"}
+		}
+		for k, v := range want {
 			if !have[k+"="+v] {
 				t.Errorf("%s %s: filter lacks %s", c.method, c.path, k)
 			}

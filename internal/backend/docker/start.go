@@ -241,7 +241,7 @@ func (b *Backend) startProxy(runner, sock string, allowed ...string) error {
 		Socket: sock, Upstream: b.cfg.DockerSocket,
 		Runner: runner, Instance: b.cfg.Instance, HostID: b.cfg.HostID,
 		Slice: b.cfg.Slice, OOMScoreAdj: b.cfg.OOMScoreAdj,
-		CacheBinds: b.cfg.CacheBinds, CacheEnv: b.cfg.CacheEnv, AllowedBinds: allowed,
+		CacheBinds: b.cfg.CacheBinds, CacheEnv: b.cfg.CacheEnv, AllowedBinds: allowed, PersistentNames: b.cfg.PersistentNames,
 		Log: b.log,
 	})
 	if err != nil {

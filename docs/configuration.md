@@ -20,6 +20,7 @@ enabled = true
 image = "ghcr.io/actions/actions-runner:latest"
 runner_uid = 1001
 tmpfs_size = "8GiB"              # /tmp in runner containers
+persistent_names = ["my-device-*"]  # containers jobs create with a matching name outlive the runner
 
 [[cache]]                        # shared host dirs, mounted into runners and job containers
 name = "pub"
@@ -79,3 +80,13 @@ targets = ["my-org", "me/tool"]  # empty = any Windows target
 | Small, fast jobs | Leave them at or below `light_threshold` so they overtake held heavy jobs |
 
 The slice's `MemoryMax` is the backstop: a job that exceeds its estimate is OOM-killed (reported in `status` and logs) instead of the host freezing.
+
+## Persistent containers
+
+`linux.persistent_names` opts container names in (`path.Match` globs). A job container created through the proxy with a matching `--name`:
+
+| Aspect | Behaviour |
+|---|---|
+| Ownership | Labelled `role=persistent`, no runner label: any runner of this instance can list, exec, inspect, `cp`, `logs` and `rm` it. Other instances and non-matching names are unaffected |
+| Cleanup | Runner cleanup, reconcile and restore never remove it. `uninstall` does |
+| Memory | Runs in the job slice, outside the ledger. Its `memory.current` is added to `external_reserved` every 15s and shown in `status` |

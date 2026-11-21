@@ -61,14 +61,16 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]string{
-		"no prefix":          `[limits]` + "\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n",
-		"no budget":          `prefix="my-ci"` + "\n[linux]\nenabled=true\n",
-		"windows no licence": `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[windows]\nenabled=true\n",
-		"bad target":         `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[target]]\norg=\"a\"\nrepo=\"a/b\"\n",
-		"bad cost":           `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[cost]]\nmatch=\"a/b\"\nmem=\"1GiB\"\n",
-		"root bind":          `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"/\"]\n",
-		"relative bind":      `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"data\"]\n",
-		"unknown key":        `prefix="my-ci"` + "\nbogus=1\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n",
+		"no prefix":           `[limits]` + "\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n",
+		"no budget":           `prefix="my-ci"` + "\n[linux]\nenabled=true\n",
+		"windows no licence":  `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[windows]\nenabled=true\n",
+		"bad target":          `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[target]]\norg=\"a\"\nrepo=\"a/b\"\n",
+		"bad cost":            `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[cost]]\nmatch=\"a/b\"\nmem=\"1GiB\"\n",
+		"root bind":           `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"/\"]\n",
+		"relative bind":       `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nallowed_binds=[\"data\"]\n",
+		"bad persistent glob": `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\npersistent_names=[\"dev-[\"]\n",
+		"empty persistent":    `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\npersistent_names=[\"\"]\n",
+		"unknown key":         `prefix="my-ci"` + "\nbogus=1\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n",
 	}
 	for name, s := range cases {
 		if _, err := Load(write(t, s)); err == nil {
