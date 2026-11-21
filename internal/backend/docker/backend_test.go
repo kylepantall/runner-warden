@@ -219,7 +219,7 @@ func TestBuildRunnerContainer(t *testing.T) {
 	if len(hc.Devices) != 1 || hc.Devices[0].PathOnHost != "/dev/kvm" {
 		t.Errorf("devices %v", hc.Devices)
 	}
-	if _, ok := hc.Tmpfs["/tmp"]; !ok {
+	if opts, ok := hc.Tmpfs["/tmp"]; !ok || !strings.Contains(opts, "exec") || strings.Contains(opts, "noexec") {
 		t.Error("no /tmp tmpfs")
 	}
 	if cfg.WorkingDir != dir || cfg.Entrypoint[len(cfg.Entrypoint)-1] != dir {
@@ -344,7 +344,7 @@ func TestPoolGateAppliesToNewProxies(t *testing.T) {
 	b := testBackend(t, &fakeAPI{})
 	g := b.PullGate()
 	g.Pause()
-	if err := b.startProxy(testRunner, b.proxySock(testRunner)); err != nil {
+	if err := b.startProxy(context.Background(), testRunner, b.proxySock(testRunner)); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = b.Cleanup(context.Background(), testRunner) }()

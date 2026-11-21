@@ -36,6 +36,7 @@ func (b *Backend) Cleanup(ctx context.Context, runner string) error {
 			errs = append(errs, err)
 		}
 	}
+	keep(b.stopProxyUnit(ctx, runner))
 
 	f := b.labelFilter(runner)
 	cs, err := b.api.ContainerList(ctx, container.ListOptions{All: true, Filters: f})

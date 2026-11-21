@@ -21,6 +21,8 @@ func migrateCmd() *cobra.Command {
 
 	var mode string
 	var updateVars bool
+	var branch string
+	var onlyRepos []string
 	apply := &cobra.Command{
 		Use:   "apply",
 		Short: "Rewrite runs-on in workflows from the saved setup plan (re-reads files first)",
@@ -30,7 +32,18 @@ func migrateCmd() *cobra.Command {
 				return err
 			}
 			_ = cfg
-			res, err := migrate.Apply(cmd.Context(), plan, migrate.ApplyOptions{Mode: migrate.Mode(mode), UpdateVars: updateVars, GH: rest, Log: newLogger("warn")})
+			if len(onlyRepos) > 0 {
+				keep := plan.Repos[:0]
+				for _, r := range plan.Repos {
+					for _, want := range onlyRepos {
+						if strings.EqualFold(want, r.Owner+"/"+r.Repo) {
+							keep = append(keep, r)
+						}
+					}
+				}
+				plan.Repos = keep
+			}
+			res, err := migrate.Apply(cmd.Context(), plan, migrate.ApplyOptions{Mode: migrate.Mode(mode), UpdateVars: updateVars, Branch: branch, GH: rest, Log: newLogger("warn")})
 			if err != nil {
 				return err
 			}
@@ -39,6 +52,8 @@ func migrateCmd() *cobra.Command {
 	}
 	apply.Flags().StringVar(&mode, "mode", "pr", "pr | push | print")
 	apply.Flags().BoolVar(&updateVars, "update-vars", false, "also update Actions variables")
+	apply.Flags().StringSliceVar(&onlyRepos, "repo", nil, "only these owner/name repos (repeatable)")
+	apply.Flags().StringVar(&branch, "branch", "", "PR branch name (default ci/runner-warden-labels-<timestamp>; match the repo's branch naming rules)")
 
 	retire := &cobra.Command{
 		Use:   "retire",

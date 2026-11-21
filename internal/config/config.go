@@ -327,7 +327,7 @@ func (c *Config) ApplyDefaults() {
 	}
 	defDur(&c.Limits.AdmissionTimeout, 40*time.Minute)
 
-	def(&c.Linux.Image, "ghcr.io/actions/actions-runner:latest")
+	def(&c.Linux.Image, "ghcr.io/kylepantall/runner-warden-runner:latest")
 	def(&c.Linux.DockerSocket, "/var/run/docker.sock")
 	if c.Linux.RunnerUID == 0 {
 		c.Linux.RunnerUID = 1001

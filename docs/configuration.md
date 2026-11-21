@@ -17,7 +17,7 @@ external_reserved = "0B"         # memory used by things outside runner-warden
 
 [linux]
 enabled = true
-image = "ghcr.io/actions/actions-runner:latest"
+image = "ghcr.io/kylepantall/runner-warden-runner:latest"  # runner + docker compose, gh, make, terraform, php, ...
 runner_uid = 1001
 tmpfs_size = "8GiB"              # /tmp in runner containers
 persistent_names = ["my-device-*"]  # containers jobs create with a matching name outlive the runner
