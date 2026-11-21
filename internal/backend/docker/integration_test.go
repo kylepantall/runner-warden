@@ -28,8 +28,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 	if img == "" {
 		img = "ghcr.io/actions/actions-runner:latest"
 	}
-	hook := shortDir(t) + "/hook"
-	_ = os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o755) //nolint:gosec // the hook must be executable
+	hook := testBinary(t)
 	b, err := New(Config{
 		Instance: "rwtest", Prefix: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
 		Slice: "runner-warden-rwtest.slice", RunnerUID: 1001, TmpfsSize: 64 << 20, OOMScoreAdj: 500,
@@ -84,10 +83,7 @@ func TestIntegrationExecSurvivesDaemonRestart(t *testing.T) {
 		img = "ghcr.io/actions/actions-runner:latest"
 	}
 	// The proxy unit runs this binary's `proxy` command.
-	bin := filepath.Join(shortDir(t), "runner-warden")
-	if out, err := exec.Command("go", "build", "-o", bin, "../../../cmd/runner-warden").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	bin := testBinary(t)
 	cfg := Config{
 		Instance: "rwtest", Prefix: "rwtest", HostID: "t0", StateDir: shortDir(t), Image: img,
 		Slice: "runner-warden-rwtest.slice", RunnerUID: 1001, TmpfsSize: 64 << 20, OOMScoreAdj: 500,
@@ -169,4 +165,18 @@ func TestIntegrationExecSurvivesDaemonRestart(t *testing.T) {
 	if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err == nil {
 		t.Fatal("proxy unit still active after Cleanup")
 	}
+}
+
+// testBinary is the runner-warden binary the proxy units run: RW_TEST_BINARY,
+// or a fresh build when Go is available.
+func testBinary(t *testing.T) string {
+	t.Helper()
+	if b := os.Getenv("RW_TEST_BINARY"); b != "" {
+		return b
+	}
+	bin := filepath.Join(shortDir(t), "runner-warden")
+	if out, err := exec.Command("go", "build", "-o", bin, "../../../cmd/runner-warden").CombinedOutput(); err != nil {
+		t.Fatalf("build (or set RW_TEST_BINARY): %v\n%s", err, out)
+	}
+	return bin
 }
