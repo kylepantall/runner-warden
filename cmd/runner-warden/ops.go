@@ -72,6 +72,15 @@ func statusCmd() *cobra.Command {
 				}
 				w.Flush()
 			}
+			if len(rep.Persistent) > 0 {
+				fmt.Fprintln(out)
+				w = tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+				fmt.Fprintln(w, "PERSISTENT\tMEM")
+				for _, c := range rep.Persistent {
+					fmt.Fprintf(w, "%s\t%s\n", c.Name, units.BytesSize(float64(c.Mem)))
+				}
+				w.Flush()
+			}
 			for vm, mem := range rep.VMsUp {
 				fmt.Fprintf(out, "windows vm %s up (%s reserved)\n", vm, units.BytesSize(float64(mem)))
 			}

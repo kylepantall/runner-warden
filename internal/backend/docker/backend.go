@@ -58,6 +58,10 @@ type Config struct {
 	// runner dir, cache paths and the runner's own mounts).
 	AllowedBinds []string
 
+	// PersistentNames are path.Match globs on container names that jobs may
+	// create as persistent containers (see dockerproxy.Config).
+	PersistentNames []string
+
 	Log *slog.Logger
 }
 

@@ -106,6 +106,13 @@ type Usage struct {
 	SampledAt  time.Time
 }
 
+// PersistentContainer is a container that outlives runners (opted in by name)
+// and runs outside the scheduler's ledger.
+type PersistentContainer struct {
+	Name string `json:"name"`
+	Mem  int64  `json:"mem_current"`
+}
+
 // Caps describes what a backend can do.
 type Caps struct {
 	OS            OS

@@ -33,6 +33,7 @@ func (d *Daemon) monitor(ctx context.Context) error {
 			return ctx.Err()
 		case <-t.C:
 		}
+		d.reservePersistent(ctx)
 		d.mu.Lock()
 		rs := make([]*runnerRec, 0, len(d.runners))
 		for _, r := range d.runners {
@@ -43,6 +44,28 @@ func (d *Daemon) monitor(ctx context.Context) error {
 			d.check(ctx, rr)
 		}
 	}
+}
+
+// reservePersistent adds the memory of persistent containers to what admission
+// treats as used outside the ledger.
+func (d *Daemon) reservePersistent(ctx context.Context) {
+	pr, ok := d.backends[core.Linux].(persistentReporter)
+	if !ok {
+		return
+	}
+	cs, err := pr.Persistent(ctx)
+	if err != nil {
+		d.log.Debug("persistent containers sample failed", "error", err.Error())
+		return
+	}
+	sum := int64(d.cfg.Limits.ExternalReserved)
+	for _, c := range cs {
+		sum += c.Mem
+	}
+	d.mu.Lock()
+	d.persist = cs
+	d.mu.Unlock()
+	d.sched.SetExternalReserved(sum)
 }
 
 // reapAfter is how long a dead runner may stay tracked before the daemon
@@ -282,6 +305,9 @@ type StatusReport struct {
 	Scheduler scheduler.Status `json:"scheduler"`
 	Runners   []RunnerStatus   `json:"runners"`
 	VMsUp     map[string]int64 `json:"vms_up,omitempty"`
+	// Persistent are containers that outlive runners; their memory counts as
+	// external reservation.
+	Persistent []core.PersistentContainer `json:"persistent,omitempty"`
 }
 
 func (d *Daemon) handlers() hookapi.Handlers {
@@ -317,6 +343,7 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 	for _, r := range d.runners {
 		rs = append(rs, *r)
 	}
+	rep.Persistent = append(rep.Persistent, d.persist...)
 	d.mu.Unlock()
 	for _, rr := range rs {
 		s := RunnerStatus{Name: rr.name, Target: rr.lane.Target.String(), OS: string(rr.lane.OS), Lane: rr.lane.Lane, VM: rr.vm, Started: rr.started, RunID: rr.runID}

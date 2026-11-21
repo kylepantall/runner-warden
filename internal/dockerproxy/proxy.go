@@ -17,6 +17,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -56,8 +57,13 @@ type Config struct {
 	// AllowedBinds are host paths (and everything under them) a job may
 	// bind-mount; anything else outside named volumes is refused.
 	AllowedBinds []string
-	MaxBody      int64        // 0 = DefaultMaxBody
-	Log          *slog.Logger // nil = discard
+	// PersistentNames are path.Match globs on container names. A container
+	// created with a matching ?name= is labelled role=persistent without a
+	// runner: it survives runner cleanup and every runner of the instance
+	// may use it.
+	PersistentNames []string
+	MaxBody         int64        // 0 = DefaultMaxBody
+	Log             *slog.Logger // nil = discard
 }
 
 // Proxy is a running per-runner proxy.
@@ -146,6 +152,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete {
 		defer p.forget()
+	}
+	if r.Method == http.MethodGet && containerListPath.MatchString(r.URL.Path) {
+		p.serveContainerList(w, r)
+		return
 	}
 	if r.Method == http.MethodPost && buildPath.MatchString(r.URL.Path) {
 		if err := p.rewriteBuild(r); err != nil {
@@ -267,7 +277,11 @@ func (p *Proxy) rewrite(w http.ResponseWriter, r *http.Request, kind string) (in
 			return http.StatusForbidden, err
 		}
 	}
-	doc["Labels"] = p.stampLabels(doc["Labels"], "job")
+	role := roleJob
+	if kind == "containers" && p.persistentName(r.URL.Query().Get("name")) {
+		role = rolePersistent
+	}
+	doc["Labels"] = p.stampLabels(doc["Labels"], role)
 	if kind == "containers" {
 		p.rewriteContainer(doc)
 	}
@@ -322,10 +336,50 @@ func (p *Proxy) Labels() map[string]string {
 	}
 }
 
+// Container roles stamped by the proxy.
+const (
+	roleJob        = "job"
+	rolePersistent = "persistent"
+)
+
+// persistentName reports whether a container name matches a configured
+// persistent glob.
+func (p *Proxy) persistentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, g := range p.cfg.PersistentNames {
+		if ok, err := path.Match(g, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// persistentLabels are the labels of a persistent container: instance-wide,
+// deliberately without a runner.
+func (p *Proxy) persistentLabels() map[string]string {
+	return map[string]string{
+		naming.MetaManaged:  "1",
+		naming.MetaInstance: p.cfg.Instance,
+		naming.MetaHostID:   p.cfg.HostID,
+		naming.MetaRole:     rolePersistent,
+	}
+}
+
 func (p *Proxy) stampLabels(existing any, role string) map[string]any {
 	labels, _ := existing.(map[string]any)
 	if labels == nil {
 		labels = map[string]any{}
+	}
+	if role == rolePersistent {
+		// Drop whatever runner label the client sent: the container must not
+		// be tied to this runner's cleanup.
+		delete(labels, naming.MetaRunner)
+		for k, v := range p.persistentLabels() {
+			labels[k] = v
+		}
+		return labels
 	}
 	for k, v := range p.Labels() {
 		labels[k] = v

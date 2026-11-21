@@ -11,6 +11,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
+
+	"github.com/kylepantall/runner-warden/internal/naming"
 )
 
 // Cleanup removes everything a runner and its jobs created. Idempotent and safe
@@ -39,6 +41,9 @@ func (b *Backend) Cleanup(ctx context.Context, runner string) error {
 	cs, err := b.api.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
 	keep(err)
 	for _, c := range cs {
+		if c.Labels[naming.MetaRole] == rolePersistent {
+			continue // outlives its runner by design
+		}
 		keep(b.api.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}))
 		b.forgetCgroup(c.ID)
 	}
