@@ -32,7 +32,7 @@ type setupOpts struct {
 	prefix, budget, sweep, runnerGroup       string
 	orgs, repos, legacy, windowsLabels, oses []string
 	tokenStdin, yes, dryRun, retire          bool
-	updateVars, allowPublic                  bool
+	updateVars, allowPublic, autoUpdate      bool
 }
 
 func setupCmd() *cobra.Command {
@@ -67,6 +67,7 @@ func setupCmd() *cobra.Command {
 	f.StringSliceVar(&o.legacy, "legacy-label", nil, "extra label that marks a runs-on as self-hosted (repeatable)")
 	f.StringSliceVar(&o.windowsLabels, "windows-label", nil, "legacy label that means Windows (repeatable)")
 	f.BoolVar(&o.allowPublic, "allow-public", false, "allow public repos (untrusted code on this host)")
+	f.BoolVar(&o.autoUpdate, "auto-update", true, "install the latest release daily via "+assets.UpdateTimer)
 	f.BoolVarP(&o.yes, "yes", "y", false, "do not ask for confirmation")
 	f.BoolVar(&o.dryRun, "dry-run", false, "stop after showing the plan")
 	return c
@@ -265,10 +266,13 @@ func runSetup(cmd *cobra.Command, o setupOpts) error {
 		return fmt.Errorf("slice: %w", err)
 	}
 	fmt.Fprintf(out, "✅ job slice %s (MemoryMax %s)\n", naming.Slice(cfg.Instance), units.BytesSize(float64(cfg.Limits.MemoryBudget)))
-	if err := installService(ctx, cfg.Instance, cfgChanged); err != nil {
+	if err := installService(ctx, cfg.Instance, cfgChanged, o.autoUpdate); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "✅ service runner-warden@%s enabled\n", cfg.Instance)
+	if o.autoUpdate {
+		fmt.Fprintf(out, "✅ daily self-update on (%s; --auto-update=false turns it off)\n", assets.UpdateTimer)
+	}
 	if err := waitDaemon(ctx, cfg, 2*time.Minute); err != nil {
 		return fmt.Errorf("service did not come up: %w (journalctl -u runner-warden@%s)", err, cfg.Instance)
 	}
@@ -460,19 +464,25 @@ func printPlan(w io.Writer, cfg *config.Config, p *migrate.Plan, o setupOpts) {
 	fmt.Fprintln(w)
 }
 
-// installService writes the unit (only when it differs), enables the service
-// and starts it; it restarts only when the unit or config changed, so a
-// no-change re-run never interrupts running jobs.
-func installService(ctx context.Context, inst string, cfgChanged bool) error {
-	unit := "/etc/systemd/system/runner-warden@.service"
+// installService writes the units (only when they differ), enables the
+// service and starts it; it restarts only when the service unit or config
+// changed, so a no-change re-run never interrupts running jobs. autoUpdate
+// enables (or disables) the daily self-update timer.
+func installService(ctx context.Context, inst string, cfgChanged, autoUpdate bool) error {
 	unitChanged := false
-	if cur, err := os.ReadFile(unit); err != nil || !bytes.Equal(cur, assets.SystemdUnit) {
-		if err := os.WriteFile(unit, assets.SystemdUnit, 0o644); err != nil { //nolint:gosec // systemd units are world-readable by design
+	for name, content := range assets.Units {
+		p := filepath.Join(systemdDir, name)
+		if cur, err := os.ReadFile(p); err == nil && bytes.Equal(cur, content) { //nolint:gosec // fixed unit names from embedded assets
+			continue
+		}
+		if err := os.WriteFile(p, content, 0o644); err != nil { //nolint:gosec // systemd units are world-readable by design
 			return err
 		}
-		unitChanged = true
+		if name == "runner-warden@.service" {
+			unitChanged = true
+		}
 	}
-	for _, a := range serviceCommands(inst, unitChanged || cfgChanged) {
+	for _, a := range serviceCommands(inst, unitChanged || cfgChanged, autoUpdate) {
 		if out, err := exec.CommandContext(ctx, "systemctl", a...).CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(a, " "), err, out)
 		}
@@ -481,14 +491,20 @@ func installService(ctx context.Context, inst string, cfgChanged bool) error {
 }
 
 // serviceCommands lists the systemctl calls: restart when something changed,
-// else start (a no-op when already running).
-func serviceCommands(inst string, changed bool) [][]string {
+// else start (a no-op when already running). The instance verb comes last.
+func serviceCommands(inst string, changed, autoUpdate bool) [][]string {
 	verb := "start"
 	if changed {
 		verb = "restart"
 	}
-	return [][]string{{"daemon-reload"}, {"enable", "runner-warden@" + inst}, {verb, "runner-warden@" + inst}}
+	timer := []string{"disable", "--now", assets.UpdateTimer}
+	if autoUpdate {
+		timer = []string{"enable", "--now", assets.UpdateTimer}
+	}
+	return [][]string{{"daemon-reload"}, timer, {"enable", "runner-warden@" + inst}, {verb, "runner-warden@" + inst}}
 }
+
+const systemdDir = "/etc/systemd/system"
 
 func waitDaemon(ctx context.Context, cfg *config.Config, timeout time.Duration) error {
 	instanceFlag = cfg.Instance

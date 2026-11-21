@@ -36,5 +36,9 @@ nfpms:
     contents:
       - src: packaging/systemd/runner-warden@.service
         dst: /lib/systemd/system/runner-warden@.service
+      - src: packaging/systemd/runner-warden-update.service
+        dst: /lib/systemd/system/runner-warden-update.service
+      - src: packaging/systemd/runner-warden-update.timer
+        dst: /lib/systemd/system/runner-warden-update.timer
 changelog:
   sort: asc

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,7 +68,7 @@ func updateCmd() *cobra.Command {
 			if exe, err = filepath.EvalSymlinks(exe); err != nil {
 				return err
 			}
-			bin, unit, err := fetchRelease(ctx, want, requireSig, out)
+			bin, units, err := fetchRelease(ctx, want, requireSig, out)
 			if err != nil {
 				return err
 			}
@@ -75,14 +76,9 @@ func updateCmd() *cobra.Command {
 				return fmt.Errorf("replace %s (run with sudo?): %w", exe, err)
 			}
 			fmt.Fprintf(out, "✅ installed %s %s\n", exe, want)
-			if unit != nil && runtime.GOOS == "linux" {
-				const unitPath = "/etc/systemd/system/runner-warden@.service"
-				if cur, err := os.ReadFile(unitPath); err == nil && !bytes.Equal(cur, unit) {
-					if err := replaceFile(unitPath, unit, 0o644); err != nil {
-						return err
-					}
-					_ = exec.CommandContext(ctx, "systemctl", "daemon-reload").Run()
-					fmt.Fprintln(out, "✅ updated systemd unit")
+			if runtime.GOOS == "linux" {
+				if err := refreshUnits(ctx, units, out); err != nil {
+					return err
 				}
 			}
 			if noRestart || runtime.GOOS != "linux" {
@@ -142,9 +138,30 @@ func get(ctx context.Context, url string, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
 
+// refreshUnits writes the release's systemd units that differ from the
+// installed ones. Enablement is left alone: setup decides that.
+func refreshUnits(ctx context.Context, units map[string][]byte, out io.Writer) error {
+	changed := false
+	for name, content := range units {
+		p := filepath.Join(systemdDir, name)
+		if cur, err := os.ReadFile(p); err == nil && bytes.Equal(cur, content) { //nolint:gosec // names checked by validUnitName
+			continue
+		}
+		if err := replaceFile(p, content, 0o644); err != nil {
+			return err
+		}
+		changed = true
+		fmt.Fprintf(out, "✅ updated systemd unit %s\n", name)
+	}
+	if changed {
+		_ = exec.CommandContext(ctx, "systemctl", "daemon-reload").Run()
+	}
+	return nil
+}
+
 // fetchRelease downloads and verifies the archive for this platform and
-// returns the binary and the systemd unit it ships.
-func fetchRelease(ctx context.Context, ver string, requireSig bool, out io.Writer) (bin, unit []byte, err error) {
+// returns the binary and the systemd units it ships, keyed by file name.
+func fetchRelease(ctx context.Context, ver string, requireSig bool, out io.Writer) (bin []byte, units map[string][]byte, err error) {
 	name := fmt.Sprintf("runner-warden_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
 	base := fmt.Sprintf("https://github.com/%s/releases/download/v%s/", releaseRepo, ver)
 	sums, err := get(ctx, base+"checksums.txt", 1<<20)
@@ -186,21 +203,27 @@ func fetchRelease(ctx context.Context, ver string, requireSig bool, out io.Write
 		if err != nil {
 			return nil, nil, err
 		}
-		switch filepath.ToSlash(h.Name) {
-		case "runner-warden":
+		name := filepath.ToSlash(h.Name)
+		switch {
+		case name == "runner-warden":
 			if bin, err = io.ReadAll(io.LimitReader(tr, maxArchive)); err != nil {
 				return nil, nil, err
 			}
-		case "packaging/systemd/runner-warden@.service":
-			if unit, err = io.ReadAll(io.LimitReader(tr, 1<<20)); err != nil {
+		case h.Typeflag == tar.TypeReg && path.Dir(name) == "packaging/systemd" && validUnitName(path.Base(name)):
+			b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
+			if err != nil {
 				return nil, nil, err
 			}
+			if units == nil {
+				units = map[string][]byte{}
+			}
+			units[path.Base(name)] = b
 		}
 	}
 	if len(bin) == 0 {
 		return nil, nil, errors.New("binary not found in the release archive")
 	}
-	return bin, unit, nil
+	return bin, units, nil
 }
 
 // verifySignature checks checksums.txt against its keyless cosign bundle when
@@ -238,6 +261,15 @@ func verifySignature(ctx context.Context, base string, sums []byte, require bool
 	}
 	fmt.Fprintln(out, "✅ signature verified")
 	return nil
+}
+
+// validUnitName accepts only runner-warden's own unit file names, so a
+// release archive can never write elsewhere under /etc/systemd/system.
+func validUnitName(n string) bool {
+	if !strings.HasPrefix(n, "runner-warden") || strings.ContainsAny(n, "/\\") {
+		return false
+	}
+	return strings.HasSuffix(n, ".service") || strings.HasSuffix(n, ".timer")
 }
 
 // replaceFile writes next to dst and renames over it, so a running binary
