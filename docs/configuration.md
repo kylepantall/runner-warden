@@ -75,7 +75,26 @@ cpus = 8
 disk_size = "96G"
 ssh_port = 2222                  # bound to 127.0.0.1 only
 targets = ["my-org", "me/tool"]  # empty = any Windows target
+
+[[windows.host]]                 # a separate Windows machine, driven over SSH
+name = "pc"
+address = "pc.example.ts.net"    # host or host:port (default 22)
+ssh_user = "me"                  # an administrator; default windows.ssh_user
+task_logon = "S4U"               # default S4U: runs whether or not anyone is signed in
+targets = ["my-org"]
 ```
+
+## Windows hosts
+
+A `[[windows.host]]` runs Windows jobs on another machine, one at a time, like a VM that is always on.
+
+| Aspect | Behaviour |
+|---|---|
+| Setup | `runner-warden windows host-script <host>` prints PowerShell to run once, elevated, on the machine (OpenSSH Server + runner-warden's key). Then `runner-warden windows host-setup <host> [--script tools.ps1]` installs the baseline and runner files |
+| Routing | Free local VMs first, then hosts. A host that does not answer over SSH is skipped and re-checked every minute |
+| Budget | Uses none of this host's memory or CPU and no `max_concurrent` licence |
+| Per job | Ephemeral JIT runner, work dir wiped, tool cache kept at `<work_dir>\_tool` |
+| Limits | The machine must stay on and reachable; runner-warden cannot restart it. Hang detection reads whole-machine CPU and the runner logs |
 
 ## Sizing jobs
 

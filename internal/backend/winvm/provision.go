@@ -91,6 +91,9 @@ func (p *Pool) Provision(ctx context.Context, vm, userScript string) error {
 	if err != nil {
 		return err
 	}
+	if v.IsRemote() {
+		return ErrRemote
+	}
 	// A disk we installed ourselves (our password file exists) resumes after
 	// an interrupted or failed run; any other disk must be adopted.
 	resume := false
@@ -257,6 +260,9 @@ func (p *Pool) Adopt(ctx context.Context, vm, fromContainer, passwordFile string
 	if err != nil {
 		return res, err
 	}
+	if v.IsRemote() {
+		return res, ErrRemote
+	}
 	f, err := p.InspectForeign(ctx, fromContainer)
 	if err != nil {
 		return res, err
@@ -349,4 +355,48 @@ func (p *Pool) Adopt(ctx context.Context, vm, fromContainer, passwordFile string
 	p.lastActive[vm] = p.now()
 	p.mu.Unlock()
 	return res, nil
+}
+
+// HostScript is the PowerShell an administrator runs once on a remote
+// Windows host: it enables OpenSSH Server and trusts runner-warden's key.
+func HostScript(pub string) string {
+	return `# Run in an elevated PowerShell on the Windows host.
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+}
+` + installKeyScript(pub)
+}
+
+// SetupHost prepares a remote Windows host whose SSH already trusts our key:
+// the bundled baseline, the runner files and the optional userScript.
+func (p *Pool) SetupHost(ctx context.Context, name, userScript string) error {
+	v, err := p.vm(name)
+	if err != nil {
+		return err
+	}
+	if !v.IsRemote() {
+		return fmt.Errorf("winvm: %s is a vm, use provision", name)
+	}
+	if err := p.probeHost(ctx, name); err != nil {
+		return fmt.Errorf("%w: %s (ssh %s@%s with key %s)", err, name, sshUser(p.cfg.Windows, v), v.Remote, p.cfg.Windows.SSHKeyFile)
+	}
+	pre := "$ErrorActionPreference='Stop'\n"
+	p.log.Info("installing baseline", "host", name)
+	if _, err := p.runScript(ctx, v, pre+Embedded("baseline.ps1"), "", baselineTimeout); err != nil {
+		return fmt.Errorf("baseline: %w", err)
+	}
+	if err := p.EnsureRunnerFiles(ctx, name); err != nil {
+		return fmt.Errorf("runner files: %w", err)
+	}
+	if strings.TrimSpace(userScript) != "" {
+		p.log.Info("running user script", "host", name)
+		if _, err := p.runScript(ctx, v, pre+userScript, "", userScriptTimeout); err != nil {
+			return fmt.Errorf("user script: %w", err)
+		}
+	}
+	p.log.Info("windows host ready", "host", name)
+	return nil
 }

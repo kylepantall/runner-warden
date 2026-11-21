@@ -205,6 +205,9 @@ func (p *Pool) ensureUp(ctx context.Context, name string, wait time.Duration) er
 	lock.Lock()
 	defer lock.Unlock()
 
+	if v.IsRemote() {
+		return p.probeHost(ctx, name)
+	}
 	p.mu.Lock()
 	if p.up[name] && p.ready[name] {
 		p.mu.Unlock()
@@ -236,6 +239,39 @@ func (p *Pool) ensureUp(ctx context.Context, name string, wait time.Duration) er
 	p.ready[name] = true
 	p.lastActive[name] = p.now()
 	p.mu.Unlock()
+	return nil
+}
+
+// probeHost checks a remote host answers over SSH and marks it up (and
+// ready) or down. A host that answered before is not probed again.
+func (p *Pool) probeHost(ctx context.Context, name string) error {
+	p.mu.Lock()
+	ok := p.up[name] && p.ready[name]
+	p.mu.Unlock()
+	if ok {
+		return nil
+	}
+	ex, err := p.execFor(p.vms[name])
+	if err != nil {
+		return err
+	}
+	c, cancel := context.WithTimeout(ctx, p.cfg.HostProbe)
+	out, _, code, err := ex.Run(c, "'rw-ready'")
+	cancel()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil || code != 0 || !strings.Contains(out, "rw-ready") {
+		if p.up[name] {
+			p.log.Warn("windows host unreachable", "host", name)
+		}
+		p.up[name], p.ready[name] = false, false
+		return ErrHostDown
+	}
+	if !p.up[name] {
+		p.log.Info("windows host reachable", "host", name)
+	}
+	p.up[name], p.ready[name] = true, true
+	p.lastActive[name] = p.now()
 	return nil
 }
 
@@ -275,8 +311,11 @@ func (p *Pool) waitSSH(ctx context.Context, v config.WindowsVM, ex Exec, wait ti
 }
 
 // stopVM gracefully stops a VM container we own and marks it down. The caller
-// must have claimed the VM.
+// must have claimed the VM. Remote hosts are never stopped.
 func (p *Pool) stopVM(ctx context.Context, v config.WindowsVM) error {
+	if v.IsRemote() {
+		return nil
+	}
 	name := v.Container(p.cfg.Instance)
 	insp, err := p.api.ContainerInspect(ctx, name)
 	if cerrdefs.IsNotFound(err) {
@@ -306,8 +345,13 @@ func (p *Pool) markDown(vm string) {
 	p.mu.Unlock()
 }
 
-// restartVM hard-restarts a hung VM container.
+// restartVM hard-restarts a hung VM container. A remote host cannot be
+// restarted; it is marked down until it answers again.
 func (p *Pool) restartVM(ctx context.Context, v config.WindowsVM) error {
+	if v.IsRemote() {
+		p.markDown(v.Name)
+		return ErrHostDown
+	}
 	name := v.Container(p.cfg.Instance)
 	insp, err := p.api.ContainerInspect(ctx, name)
 	if err != nil {
@@ -327,11 +371,21 @@ func (p *Pool) restartVM(ctx context.Context, v config.WindowsVM) error {
 }
 
 // StopIdle stops VMs with no runner idle for at least idle_ttl and returns
-// their names. Errors are logged and the VM is tried again next call.
+// their names. Errors are logged and the VM is tried again next call. Remote
+// hosts are never stopped; an idle one that is down is probed instead.
 func (p *Pool) StopIdle(ctx context.Context, now time.Time) []string {
 	ttl := p.cfg.Windows.IdleTTL.D()
 	var stopped []string
 	for _, name := range p.order {
+		if p.vms[name].IsRemote() {
+			p.mu.Lock()
+			probe := !p.up[name] && !p.busyLocked(name)
+			p.mu.Unlock()
+			if probe {
+				_ = p.probeHost(ctx, name)
+			}
+			continue
+		}
 		p.mu.Lock()
 		idle := p.up[name] && !p.busyLocked(name) && now.Sub(p.lastActive[name]) >= ttl
 		if idle {
@@ -357,6 +411,9 @@ func (p *Pool) StopNow(ctx context.Context, vm string) error {
 	v, err := p.vm(vm)
 	if err != nil {
 		return err
+	}
+	if v.IsRemote() {
+		return nil // holds no memory here
 	}
 	p.mu.Lock()
 	if p.busyLocked(vm) {

@@ -191,6 +191,10 @@ func New(o Options) (*Daemon, error) {
 			_, mem, up := d.win.Peek(l.Target)
 			return mem, up
 		}
+		so.RemoteVM = func(l scheduler.LaneKey) bool {
+			vm, _, up := d.win.Peek(l.Target)
+			return up && d.win.IsRemote(vm)
+		}
 	}
 	if cores, err := admission.ReadTopology(""); err == nil {
 		so.Cores = cores

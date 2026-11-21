@@ -153,7 +153,9 @@ $state='Missing'; if ($t) { $state=[string]$t.State }
 $procs=@(Get-Process -Name 'Runner.Listener','Runner.Worker').Count
 $log=0; $i=Get-Item ` + psq(j.Log()) + `; if ($i) { $log=$i.Length }
 $diag=0; $m=Get-ChildItem ` + psq(j.Diag()) + ` -File | Measure-Object Length -Sum; if ($m.Sum) { $diag=$m.Sum }
-"state=$state procs=$procs log=$log diag=$diag"
+$cpu=[long]((Get-Process | Measure-Object CPU -Sum).Sum)
+$os=Get-CimInstance Win32_OperatingSystem; $mem=0; if ($os) { $mem=[long](($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)*1024) }
+"state=$state procs=$procs log=$log diag=$diag cpu=$cpu mem=$mem"
 `
 }
 
@@ -163,6 +165,8 @@ type guestStats struct {
 	Procs int
 	Log   int64
 	Diag  int64
+	CPU   float64 // seconds, all live processes
+	Mem   int64   // bytes in use, whole machine
 }
 
 func (g guestStats) Alive() bool { return g.State == "Running" || g.Procs > 0 }
@@ -187,6 +191,10 @@ func parseGuestStats(out string) (guestStats, error) {
 			g.Log = n
 		case "diag":
 			g.Diag = n
+		case "cpu":
+			g.CPU = float64(n)
+		case "mem":
+			g.Mem = n
 		}
 	}
 	if !seen {

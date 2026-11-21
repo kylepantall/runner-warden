@@ -733,3 +733,29 @@ func TestCPUBudgetHoldsJobsThatDoNotFit(t *testing.T) {
 		t.Fatal("held job not started once CPU freed")
 	}
 }
+
+func TestRemoteWindowsJobTakesNoCPU(t *testing.T) {
+	win := LaneKey{core.ScaleSetKey{Target: core.Target{Owner: "a"}, OS: core.Windows}, 1}
+	win2 := LaneKey{win.ScaleSetKey, 2}
+	remote := true
+	h := newHarness(t, func(o *Options) {
+		o.CPUBudget, o.DefaultJobCPU = 4000, 2000
+		o.Lanes = append(o.Lanes, win, win2)
+		o.VMCost = func(LaneKey) (int64, bool) { return 0, true }
+		o.RemoteVM = func(LaneKey) bool { return remote }
+	})
+	j := h.assign(win, h.job("a", "win"))
+	if _, ok := h.startsFor(j.JobID); !ok {
+		t.Fatal("job not started")
+	}
+	if got := h.s.Snapshot().Ledger.CPUReserved; got != 0 {
+		t.Fatalf("remote job reserved %d millicpus here", got)
+	}
+	remote = false
+	if j2 := h.assign(win2, h.job("a", "win2")); func() bool { _, ok := h.startsFor(j2.JobID); return !ok }() {
+		t.Fatal("second job not started")
+	}
+	if got := h.s.Snapshot().Ledger.CPUReserved; got != 2000 {
+		t.Fatalf("local VM job should reserve its CPU, got %d", got)
+	}
+}
