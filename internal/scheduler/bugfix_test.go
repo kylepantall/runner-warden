@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -422,5 +423,28 @@ func TestGrantCarriesRuleDevicesAndImage(t *testing.T) {
 	}
 	if len(plain.Devices) != 0 || plain.Image != "" {
 		t.Fatalf("plain grant %+v", plain)
+	}
+}
+
+// ---- failed starts back off (no hot loop while the only VM is busy) ----
+
+func TestFailedStartsBackOffPerJob(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.VMCost = func(LaneKey) (int64, bool) { return 8 * gib, true } })
+	h.run.startErr = errors.New("no idle windows vm serves this target")
+	for n := 1; n <= 4; n++ {
+		h.assign(winLane(n), h.job("a", "w"))
+	}
+	// Long enough for every head to pass HolGrace and HoldMax, so promote()
+	// (parked runners) retries them too.
+	const secs = 300
+	for range secs {
+		h.tick(time.Second)
+	}
+	h.run.mu.Lock()
+	calls := h.run.calls
+	h.run.mu.Unlock()
+	// One start and one promotion attempt per job per StartRetry, at most.
+	if limit := 4 * 2 * (secs/10 + 1); calls > limit {
+		t.Fatalf("%d StartRunner calls in %ds for 4 jobs (limit %d): retries ignore StartRetry", calls, secs, limit)
 	}
 }

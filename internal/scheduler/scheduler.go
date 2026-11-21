@@ -1288,7 +1288,9 @@ func (s *Scheduler) promote() {
 		all := true
 		for _, l := range groups[k] {
 			h := (*jobRec)(nil)
-			if len(l.queue) > 0 && l.queue[0].phase == pHeld && l.queue[0].unboundAt.IsZero() {
+			// A head backing off after a failed start (notBefore) counts as not
+			// waiting: promoting it again would retry the start in a hot loop.
+			if len(l.queue) > 0 && l.queue[0].phase == pHeld && l.queue[0].unboundAt.IsZero() && !now.Before(l.queue[0].notBefore) {
 				h = l.queue[0]
 			}
 			switch {
@@ -1304,7 +1306,7 @@ func (s *Scheduler) promote() {
 			cs = cs[:0]
 			for _, l := range groups[k] {
 				if len(l.queue) > 0 {
-					if h := l.queue[0]; h.phase == pHeld && h.unboundAt.IsZero() && now.Sub(h.age) > s.o.HoldMax {
+					if h := l.queue[0]; h.phase == pHeld && h.unboundAt.IsZero() && !now.Before(h.notBefore) && now.Sub(h.age) > s.o.HoldMax {
 						cs = append(cs, h)
 					}
 				}

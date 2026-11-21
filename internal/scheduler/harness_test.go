@@ -40,11 +40,13 @@ type fakeRunners struct {
 	reruns    []string
 	startErr  error
 	rerunErrs int
+	calls     int // every StartRunner call, failed ones included
 }
 
 func (f *fakeRunners) StartRunner(_ context.Context, l LaneKey, g Grant) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.startErr != nil {
 		return "", f.startErr
 	}
