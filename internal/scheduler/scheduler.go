@@ -369,6 +369,42 @@ func setJob(r *jobRec, j core.Job) {
 	r.job = j
 }
 
+// applyRule sets the job's cost, pinned cores, devices and image from the
+// first matching [[cost]] rule, or the defaults.
+func (s *Scheduler) applyRule(r *jobRec) {
+	j := r.job
+	r.cost, r.pinned, r.devices, r.image = s.o.DefaultJobMem, 0, nil, ""
+	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
+		if rule.Mem > 0 {
+			r.cost = rule.Mem
+		}
+		r.pinned = rule.PinnedCores
+		r.devices, r.image = rule.Devices, rule.Image
+	}
+}
+
+// updateJob takes newer job details and re-applies the cost rule when they
+// change which rule matches: the first event for a job (a placeholder, or a
+// Started after a restart) may lack its workflow or name. A runner already
+// holding the job is resized to the new cost.
+func (s *Scheduler) updateJob(r *jobRec, j core.Job) {
+	key := func() string { return admission.JobKey(r.job.Owner, r.job.Repo, r.job.WorkflowRef, r.job.Name) }
+	before := key()
+	setJob(r, j)
+	if key() == before {
+		return
+	}
+	old := r.cost
+	s.applyRule(r)
+	if r.cost == old {
+		return
+	}
+	s.log.info("job cost updated", "job", r.id, "from", old, "to", r.cost)
+	if rr := r.rr; rr != nil && rr.full && rr.job == r {
+		_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, r))
+	}
+}
+
 func (s *Scheduler) newJob(lk LaneKey, j core.Job) *jobRec {
 	now := s.now()
 	s.seq++
@@ -384,14 +420,7 @@ func (s *Scheduler) newJob(lk LaneKey, j core.Job) *jobRec {
 	}
 	r := &jobRec{id: id, job: j, lane: lk, ageKey: ageKeyOf(id, j), age: now, synthetic: j.JobID == ""}
 	r.seq = s.seq
-	r.cost = s.o.DefaultJobMem
-	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
-		if rule.Mem > 0 {
-			r.cost = rule.Mem
-		}
-		r.pinned = rule.PinnedCores
-		r.devices, r.image = rule.Devices, rule.Image
-	}
+	s.applyRule(r)
 	if a, ok := s.ages[r.ageKey]; ok {
 		r.age = a.t
 	}
@@ -431,7 +460,7 @@ func (s *Scheduler) onAssigned(lk LaneKey, j core.Job) {
 		if r.phase == pBound {
 			return // stale: already started
 		}
-		setJob(r, j)
+		s.updateJob(r, j)
 		if a, ok := s.ages[r.ageKey]; ok {
 			s.ages[r.ageKey] = ageEntry{t: a.t, seen: s.now()}
 		}
@@ -473,7 +502,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 		rec = s.newJob(lk, j)
 	}
 	s.lane(lk).changedAt = s.now()
-	setJob(rec, j)
+	s.updateJob(rec, j)
 	rec.lane = lk
 	name := j.RunnerName
 	var rr *runnerRec

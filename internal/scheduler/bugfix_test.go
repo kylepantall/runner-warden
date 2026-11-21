@@ -448,3 +448,24 @@ func TestFailedStartsBackOffPerJob(t *testing.T) {
 		t.Fatalf("%d StartRunner calls in %ds for 4 jobs (limit %d): retries ignore StartRetry", calls, secs, limit)
 	}
 }
+
+// ---- a job first seen without its workflow gets its rule once known ----
+
+func TestCostReappliedWhenJobDetailsArrive(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.Costs = []admission.Rule{{Match: "a/r/ci.yml/build*", Mem: 7 * gib}} })
+	l := lane("a", 1)
+	full := h.job("a", "build (linux)")
+	full.RunnerName = "adopted-1"
+	early := full
+	early.WorkflowRef, early.Name = "", "" // e.g. a Started seen after a restart
+	h.s.Started(l.ScaleSetKey, l.Lane, early)
+	h.wait()
+	if used := 10*gib - h.free(); used >= 7*gib {
+		t.Fatalf("precondition: early event should not match the rule, used=%d", used)
+	}
+	h.s.Started(l.ScaleSetKey, l.Lane, full) // the same job, now with its details
+	h.wait()
+	if used := 10*gib - h.free(); used < 7*gib {
+		t.Fatalf("ledger still holds the default cost once the job is known: used=%d", used)
+	}
+}
