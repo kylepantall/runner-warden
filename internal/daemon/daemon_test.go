@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -330,5 +331,33 @@ func TestPersistentMemoryIsReservedExternally(t *testing.T) {
 	d.reservePersistent(context.Background())
 	if got := d.sched.Snapshot().Ledger.External; got != 1300 {
 		t.Fatalf("external after failed sample %d", got)
+	}
+}
+
+func TestAutoCacheMountsAndEnv(t *testing.T) {
+	cfg := &config.Config{Instance: "main", Linux: config.Linux{Enabled: true}, AutoCache: config.AutoCache{Scope: "org"},
+		Caches: []config.Cache{{Name: "pub", Env: "PUB_CACHE"}}}
+	d := &Daemon{cfg: cfg, log: slog.New(slog.DiscardHandler)}
+	lane := scheduler.LaneKey{ScaleSetKey: core.ScaleSetKey{Target: core.Target{Owner: "org"}, OS: core.Linux}, Lane: 1}
+	spec := core.RunnerSpec{Env: map[string]string{}}
+	if s := d.autoCache(&spec, lane, scheduler.Grant{Host: "pc", Job: core.Job{Owner: "org", Repo: "app"}}); s != "" {
+		t.Fatal("a host's cache is not tracked here")
+	}
+	if len(spec.Mounts) != 1 || spec.Mounts[0].ContainerPath != "/opt/rw-cache" || !strings.HasSuffix(spec.Mounts[0].HostPath, "/main/auto/org") {
+		t.Fatalf("%+v", spec.Mounts)
+	}
+	if _, ok := spec.Env["PUB_CACHE"]; ok || spec.Env["NUGET_PACKAGES"] == "" {
+		t.Fatalf("[[cache]] env must win: %v", spec.Env)
+	}
+	win := lane
+	win.OS = core.Windows
+	spec2 := core.RunnerSpec{Env: map[string]string{}}
+	cfg.AutoCache.Scope = "off"
+	if d.autoCache(&spec2, lane, scheduler.Grant{}); len(spec2.Mounts) != 0 {
+		t.Fatal("off means off")
+	}
+	cfg.AutoCache.Scope = "repo"
+	if d.autoCache(&spec2, win, scheduler.Grant{}); len(spec2.Mounts) != 0 {
+		t.Fatal("Linux only")
 	}
 }

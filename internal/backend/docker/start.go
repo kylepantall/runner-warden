@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -219,6 +220,17 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 	if err != nil {
 		b.log.Warn("docker socket gid unknown", "socket", b.cfg.DockerSocket, "error", err.Error())
 		gid = 0
+	}
+	// A writable mount that does not exist yet (an automatic cache on a
+	// remote host) is made for the runner user; Docker would make it root's.
+	for _, m := range spec.Mounts {
+		if _, err := os.Stat(m.HostPath); m.ReadOnly || !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err := mkdirAll(m.HostPath); err != nil {
+			return core.Handle{}, err
+		}
+		_ = os.Chown(m.HostPath, b.runnerOwner(), b.runnerOwner())
 	}
 	if err := b.writeJIT(dir, spec.JITConfig); err != nil {
 		_ = b.Cleanup(ctx, spec.Name)

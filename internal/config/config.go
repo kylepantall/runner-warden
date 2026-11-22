@@ -70,17 +70,18 @@ type Config struct {
 	LogLevel      string `toml:"log_level"`
 	ControlGroup  string `toml:"control_group"` // group owning the control socket (0660)
 
-	GitHub  GitHub   `toml:"github"`
-	Limits  Limits   `toml:"limits"`
-	Linux   Linux    `toml:"linux"`
-	Windows Windows  `toml:"windows"`
-	MacOS   MacOS    `toml:"macos"`
-	Hang    Hang     `toml:"hang"`
-	Stale   Stale    `toml:"stale"`
-	ImageGC ImageGC  `toml:"image_gc"`
-	Caches  []Cache  `toml:"cache"`
-	Costs   []Cost   `toml:"cost"`
-	Targets []Target `toml:"target"`
+	GitHub    GitHub    `toml:"github"`
+	Limits    Limits    `toml:"limits"`
+	Linux     Linux     `toml:"linux"`
+	Windows   Windows   `toml:"windows"`
+	MacOS     MacOS     `toml:"macos"`
+	Hang      Hang      `toml:"hang"`
+	Stale     Stale     `toml:"stale"`
+	ImageGC   ImageGC   `toml:"image_gc"`
+	AutoCache AutoCache `toml:"auto_cache"`
+	Caches    []Cache   `toml:"cache"`
+	Costs     []Cost    `toml:"cost"`
+	Targets   []Target  `toml:"target"`
 }
 
 // GitHub holds credentials settings.
@@ -357,6 +358,19 @@ type Stale struct {
 	Interval            Duration `toml:"interval"`
 }
 
+// AutoCache keeps the tool cache and package-manager caches of Linux jobs on
+// the machine, so setup-* actions and restores are warm without [[cache]]
+// entries. Scope decides who shares one: "repo" (each repo its own, the
+// default), "org" (every repo of an owner: warmer, but they must trust each
+// other) or "off". The least recently used are removed past MaxSize.
+type AutoCache struct {
+	Scope   string `toml:"scope"`
+	MaxSize Size   `toml:"max_size"`
+}
+
+// On reports whether automatic caches are in use.
+func (a AutoCache) On() bool { return a.Scope != "off" }
+
 // ImageGC configures image garbage collection.
 type ImageGC struct {
 	HighWatermark int      `toml:"high_watermark_percent"`
@@ -579,6 +593,8 @@ func (c *Config) ApplyDefaults() {
 
 	defDur(&c.Stale.Interval, 2*time.Minute)
 
+	def(&c.AutoCache.Scope, "repo")
+	defSize(&c.AutoCache.MaxSize, 50*units.GiB)
 	if c.ImageGC.HighWatermark == 0 {
 		c.ImageGC.HighWatermark = 85
 	}
@@ -706,6 +722,9 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(h.Binary, "/") || strings.ContainsAny(h.Binary, " '\"$`\\") {
 			add("linux.host %q: binary must be an absolute path without spaces or quotes", h.Name)
 		}
+	}
+	if s := c.AutoCache.Scope; s != "repo" && s != "org" && s != "off" {
+		add("auto_cache.scope must be repo, org or off")
 	}
 	aptRe := regexp.MustCompile(`^[a-z0-9][a-z0-9+.\-]*(=[A-Za-z0-9.+:~\-]+)?$`)
 	builds := map[string]bool{}

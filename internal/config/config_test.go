@@ -238,3 +238,17 @@ func TestLinuxBuildsAndWindowsPackages(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoCacheConfig(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n"
+	c, err := Load(write(t, base))
+	if err != nil || c.AutoCache.Scope != "repo" || !c.AutoCache.On() || c.AutoCache.MaxSize <= 0 {
+		t.Fatalf("defaults %+v %v", c.AutoCache, err)
+	}
+	if c, err := Load(write(t, base+"[auto_cache]\nscope=\"off\"\n")); err != nil || c.AutoCache.On() {
+		t.Fatal("off", err)
+	}
+	if _, err := Load(write(t, base+"[auto_cache]\nscope=\"everyone\"\n")); err == nil {
+		t.Fatal("bad scope accepted")
+	}
+}
