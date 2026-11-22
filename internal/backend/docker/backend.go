@@ -50,6 +50,9 @@ type Config struct {
 	// path, so a recreated socket stays visible).
 	HookBinary string
 	HookDir    string
+	// NoHooks starts runners without the job hooks: on a remote host nothing
+	// serves the hook socket, and admission was settled before the start.
+	NoHooks bool
 
 	// CacheBinds ("host:container[:opts]") and CacheEnv go to runner and jobs.
 	CacheBinds []string

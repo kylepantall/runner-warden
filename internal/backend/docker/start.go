@@ -89,15 +89,15 @@ func (b *Backend) buildRunnerContainer(spec core.RunnerSpec, dir, sock string, g
 		env[k] = v
 	}
 	env["DOCKER_HOST"] = "unix://" + sock
-	env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = started
-	env["ACTIONS_RUNNER_HOOK_JOB_COMPLETED"] = completed
-	env["RUNNER_WARDEN_SOCKET"] = filepath.Join(b.hookDir(spec.Name), "hook.sock")
-	env["RUNNER_WARDEN_RUNNER"] = spec.Name
-
-	binds := []string{
-		bind(dir, dir, false),
-		bind(c.HookBinary, c.HookBinary, true),
-		bind(b.hookDir(spec.Name), b.hookDir(spec.Name), false),
+	binds := []string{bind(dir, dir, false)}
+	if !c.NoHooks {
+		env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = started
+		env["ACTIONS_RUNNER_HOOK_JOB_COMPLETED"] = completed
+		env["RUNNER_WARDEN_SOCKET"] = filepath.Join(b.hookDir(spec.Name), "hook.sock")
+		env["RUNNER_WARDEN_RUNNER"] = spec.Name
+		binds = append(binds,
+			bind(c.HookBinary, c.HookBinary, true),
+			bind(b.hookDir(spec.Name), b.hookDir(spec.Name), false))
 	}
 	for _, m := range spec.Mounts {
 		binds = append(binds, bind(m.HostPath, m.ContainerPath, m.ReadOnly))
@@ -208,7 +208,7 @@ func (b *Backend) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle,
 	}
 	// The daemon creates the runner's private hook dir first; a missing one
 	// would be created by Docker as a root-owned 0755 dir.
-	if _, err := os.Stat(b.hookDir(spec.Name)); err != nil {
+	if _, err := os.Stat(b.hookDir(spec.Name)); err != nil && !b.cfg.NoHooks {
 		return core.Handle{}, fmt.Errorf("runner hook dir: %w", err)
 	}
 	dir, sock := b.runnerDir(spec.Name), b.proxySock(spec.Name)

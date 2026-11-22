@@ -124,6 +124,42 @@ type Linux struct {
 	// runner image in .github/runner-warden.yml only when the image matches
 	// one; empty disables repo-chosen images.
 	AllowedImages []string `toml:"allowed_images"`
+	// SSHKeyFile is the key used to reach [[linux.host]] machines; default
+	// windows.ssh_key_file.
+	SSHKeyFile string `toml:"ssh_key_file"`
+	// Hosts are separate Linux machines (or WSL distros) running Docker and
+	// the runner-warden binary. Jobs overflow to them when this host's budget
+	// is full; they use none of this host's memory or CPU.
+	Hosts []LinuxHost `toml:"host"`
+}
+
+// LinuxHost is a Linux machine runner-warden drives over SSH: each operation
+// runs "<exec> <binary> agent" with a JSON request on stdin. The daemon
+// installs its own binary at Binary when it is missing or another version.
+type LinuxHost struct {
+	Name    string `toml:"name"`
+	Address string `toml:"address"`  // host or host:port (default port 22)
+	SSHUser string `toml:"ssh_user"` // default root
+	// Exec prefixes every command so it runs as root on the Linux side;
+	// default "sudo -n". For WSL behind Windows OpenSSH: "wsl -d Ubuntu -u
+	// root --".
+	Exec          string   `toml:"exec"`
+	Binary        string   `toml:"binary"`         // default /usr/local/bin/runner-warden
+	MaxConcurrent int      `toml:"max_concurrent"` // jobs at once; default 2
+	Targets       []string `toml:"targets"`        // owners or owner/repo; ["*"] for any
+}
+
+// SSHAddr is the host's address with the port filled in.
+func (h LinuxHost) SSHAddr() string {
+	if _, _, err := net.SplitHostPort(h.Address); err == nil {
+		return h.Address
+	}
+	return net.JoinHostPort(h.Address, "22")
+}
+
+// Serves reports whether the host may run jobs for a target.
+func (h LinuxHost) Serves(t core.Target) bool {
+	return WindowsVM{Targets: h.Targets}.Serves(t)
 }
 
 // Windows configures the Windows VM backend.
@@ -255,6 +291,9 @@ type Cost struct {
 	// Image replaces the runner image for matching jobs (Linux). It must be
 	// built FROM the default runner image.
 	Image string `toml:"image"`
+	// Local keeps matching jobs on this host, never on a [[linux.host]]
+	// (jobs with devices or pinned cores always stay).
+	Local bool `toml:"local"`
 }
 
 // Target is an org or repo that runners serve.
@@ -397,6 +436,16 @@ func (c *Config) ApplyDefaults() {
 	def(&c.Windows.Image, "dockurr/windows")
 	def(&c.Windows.SSHUser, "runner")
 	def(&c.Windows.SSHKeyFile, filepath.Join(c.StateDir, "windows", "id_ed25519"))
+	def(&c.Linux.SSHKeyFile, c.Windows.SSHKeyFile)
+	for i := range c.Linux.Hosts {
+		h := &c.Linux.Hosts[i]
+		def(&h.SSHUser, "root")
+		def(&h.Exec, "sudo -n")
+		def(&h.Binary, "/usr/local/bin/runner-warden")
+		if h.MaxConcurrent == 0 {
+			h.MaxConcurrent = 2
+		}
+	}
 	def(&c.Windows.RunnerDir, `C:\actions-runner`)
 	def(&c.Windows.WorkDir, `C:\rw`)
 	defDur(&c.Windows.IdleTTL, 15*time.Minute)
@@ -521,6 +570,30 @@ func (c *Config) Validate() error {
 		}
 		if h.TaskLogon != "" && h.TaskLogon != "Interactive" && h.TaskLogon != "S4U" {
 			add("windows.host %q: task_logon must be Interactive or S4U", h.Name)
+		}
+	}
+	for i, h := range c.Linux.Hosts {
+		if naming.ValidatePrefix(h.Name) != nil {
+			add("linux.host[%d]: name must be lowercase letters, digits and hyphens", i)
+		}
+		if vmNames[h.Name] {
+			add("linux.host %q: name already used by another host or vm", h.Name)
+		}
+		vmNames[h.Name] = true
+		if !c.Linux.Enabled {
+			add("linux.host %q: [linux] must be enabled", h.Name)
+		}
+		if h.Address == "" || strings.ContainsAny(h.Address, " /@") {
+			add("linux.host %q: address must be a host or host:port", h.Name)
+		}
+		if len(h.Targets) == 0 {
+			add("linux.host %q: set targets (owners or owner/repo; [\"*\"] for any)", h.Name)
+		}
+		if h.MaxConcurrent < 0 {
+			add("linux.host %q: max_concurrent must not be negative", h.Name)
+		}
+		if !strings.HasPrefix(h.Binary, "/") || strings.ContainsAny(h.Binary, " '\"$`\\") {
+			add("linux.host %q: binary must be an absolute path without spaces or quotes", h.Name)
 		}
 	}
 	if !c.Linux.Enabled && !c.Windows.Enabled {

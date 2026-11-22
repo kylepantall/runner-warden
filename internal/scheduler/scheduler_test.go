@@ -759,3 +759,95 @@ func TestRemoteWindowsJobTakesNoCPU(t *testing.T) {
 		t.Fatalf("local VM job should reserve its CPU, got %d", got)
 	}
 }
+
+func TestLinuxJobsOverflowToHost(t *testing.T) {
+	up := true
+	h := newHarness(t, func(o *Options) {
+		o.DefaultJobMem = 6 * gib
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 1, Serves: func(t core.Target) bool { return t.Owner == "a" }}}
+		o.HostUp = func(string) bool { return up }
+	})
+	j1 := h.assign(lane("a", 1), h.job("a", "one"))
+	if g, ok := h.startsFor(j1.JobID); !ok || g.Host != "" {
+		t.Fatalf("first job runs here: %+v %v", g, ok)
+	}
+	free := h.free()
+	j2 := h.assign(lane("a", 2), h.job("a", "two"))
+	g2, ok := h.startsFor(j2.JobID)
+	if !ok || g2.Host != "pc" || g2.MemBytes != 0 {
+		t.Fatalf("overflow goes to the host: %+v %v", g2, ok)
+	}
+	r2 := h.begin(lane("a", 2), j2)
+	if h.free() != free {
+		t.Fatalf("host job reserved memory here: %d -> %d", free, h.free())
+	}
+	j3 := h.assign(lane("a", 3), h.job("a", "three"))
+	if _, ok := h.startsFor(j3.JobID); ok {
+		t.Fatal("host slot is full; the job must wait")
+	}
+	up = false
+	h.done(lane("a", 2), j2, r2, "succeeded")
+	h.tick(time.Second)
+	if _, ok := h.startsFor(j3.JobID); ok {
+		t.Fatal("an unreachable host takes no job")
+	}
+	up = true
+	h.tick(time.Second)
+	if g, ok := h.startsFor(j3.JobID); !ok || g.Host != "pc" {
+		t.Fatalf("freed slot takes the next job: %+v %v", g, ok)
+	}
+}
+
+func TestLocalJobsNeverGoToHost(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.DefaultJobMem = 6 * gib
+		o.Costs = []admission.Rule{{Match: "a/r/ci.yml/deploy", Local: true}, {Match: "a/r/ci.yml/emu", Devices: []string{"/dev/kvm"}}}
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 4}}
+	})
+	h.assign(lane("a", 1), h.job("a", "fill"))
+	for i, name := range []string{"deploy", "emu"} {
+		j := h.assign(lane("a", 2+i), h.job("a", name))
+		if g, ok := h.startsFor(j.JobID); ok {
+			t.Fatalf("%s went to %q", name, g.Host)
+		}
+	}
+}
+
+func TestRestoredHostRunnerReservesNothing(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 1}}
+	})
+	free := h.free()
+	j := h.job("a", "x")
+	j.RunnerName = "rn-pc"
+	h.s.Restore([]RestoredRunner{{Name: "rn-pc", Lane: lane("a", 1), Job: &j, Started: true, Host: "pc"}})
+	h.wait()
+	if h.free() != free {
+		t.Fatalf("restored host runner reserved memory: %d -> %d", free, h.free())
+	}
+	// Its slot is taken: an overflow job waits for it.
+	h.s.locked(func() {
+		if got := h.s.freeHost(lane("a", 2)); got != "" {
+			t.Errorf("slot should be used, got %q", got)
+		}
+	})
+}
+
+func TestHeldOldJobDoesNotBlockOverflow(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.DefaultJobMem = 4 * gib
+		o.Costs = []admission.Rule{{Match: "a/r/ci.yml/big", Mem: 9 * gib, Local: true}}
+		o.ReserveAfter = time.Minute
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 2}}
+	})
+	h.assign(lane("a", 1), h.job("a", "small")) // 4GiB here, 6GiB free
+	big := h.assign(lane("a", 2), h.job("a", "big"))
+	h.tick(2 * time.Minute) // big is now past ReserveAfter
+	j := h.assign(lane("a", 3), h.job("a", "next"))
+	if g, ok := h.startsFor(j.JobID); !ok || g.Host != "pc" {
+		t.Fatalf("overflow must not wait behind a held local job: %+v %v", g, ok)
+	}
+	if _, ok := h.startsFor(big.JobID); ok {
+		t.Fatal("big job cannot fit yet")
+	}
+}

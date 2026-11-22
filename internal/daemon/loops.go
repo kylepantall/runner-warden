@@ -360,6 +360,10 @@ type StatusReport struct {
 	VMsUp     map[string]int64 `json:"vms_up,omitempty"`
 	// WindowsHosts are remote Windows hosts and whether they answer.
 	WindowsHosts map[string]bool `json:"windows_hosts,omitempty"`
+	// LinuxHosts maps every [[linux.host]] to reachable or not, in
+	// LinuxHostNames order.
+	LinuxHosts     map[string]bool `json:"linux_hosts,omitempty"`
+	LinuxHostNames []string        `json:"linux_host_names,omitempty"`
 	// WindowsVMs lists every configured VM, up or not.
 	WindowsVMs []string `json:"windows_vms,omitempty"`
 	// Persistent are containers that outlive runners; their memory counts as
@@ -411,6 +415,12 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 			}
 		}
 		rep.Runners = append(rep.Runners, s)
+	}
+	if lh, ok := d.backends[core.Linux].(linuxHosts); ok {
+		rep.LinuxHosts = lh.HostsUp()
+		for _, h := range d.cfg.Linux.Hosts {
+			rep.LinuxHostNames = append(rep.LinuxHostNames, h.Name)
+		}
 	}
 	if d.win != nil {
 		rep.VMsUp = d.win.VMsUp()

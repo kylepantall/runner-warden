@@ -39,6 +39,7 @@ pinned_cores = 3                 # optional: whole physical cores, SMT siblings 
 cpus = 4                         # optional: shared logical CPUs (ignored with pinned_cores)
 devices = ["/dev/kvm"]           # optional: host devices for matching jobs
 image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file)
+local = true                     # optional: never on a [[linux.host]] (devices/pinned cores imply it)
 
 [hang]
 idle = "30m"                     # no CPU, IO or job output
@@ -76,6 +77,14 @@ disk_size = "96G"
 ssh_port = 2222                  # bound to 127.0.0.1 only
 targets = ["my-org", "me/tool"]  # empty = any Windows target
 
+[[linux.host]]                   # another Linux machine (or WSL distro) for overflow jobs
+name = "pc-wsl"
+address = "pc.example.ts.net"    # host or host:port (default 22)
+ssh_user = "me"                  # default root; key: linux.ssh_key_file (default windows.ssh_key_file)
+exec = "wsl -d Ubuntu -u root --"  # runs commands as root there; default "sudo -n"
+max_concurrent = 2               # jobs at once
+targets = ["my-org"]
+
 [[windows.host]]                 # a separate Windows machine, driven over SSH
 name = "pc"
 address = "pc.example.ts.net"    # host or host:port (default 22)
@@ -95,6 +104,19 @@ A `[[windows.host]]` runs Windows jobs on another machine, one at a time, like a
 | Budget | Uses none of this host's memory or CPU and no `max_concurrent` licence |
 | Per job | Ephemeral JIT runner, work dir wiped, tool cache kept at `<work_dir>\_tool` |
 | Limits | The machine must stay on and reachable; runner-warden cannot restart it. Hang detection reads whole-machine CPU and the runner logs |
+
+## Linux hosts
+
+A `[[linux.host]]` takes Linux jobs this host cannot fit. It runs the same Docker backend, driven over SSH; the daemon keeps the scale sets and the scheduler.
+
+| Aspect | Behaviour |
+|---|---|
+| Needs | SSH to the machine, Docker Engine and systemd there, root through `exec`. runner-warden installs its own binary at `binary` (default `/usr/local/bin/runner-warden`) and replaces it after every update |
+| Routing | This host first. A job goes to a host only when this host's memory or CPU budget (or `max_runners`) cannot fit it, a reachable host serving its target has a free slot, and its rule is not `local` |
+| Budget | Host jobs reserve none of this host's memory or CPU; `max_concurrent` caps them. The host's own memory is not checked |
+| Per job | Ephemeral JIT runner with its Docker proxy, caches (`[[cache]]` paths, created there) and per-job image (falls back to the default when the host cannot pull it). No job hooks, no persistent containers |
+| Outages | Probed every minute. A host that stops answering takes no new jobs; its runners stay tracked for 15 minutes, then count as gone |
+| WSL | Behind Windows OpenSSH use `exec = "wsl -d <distro> -u root --"`. Install Docker Engine inside the distro (`apt install docker.io`, systemd on in `/etc/wsl.conf`), not Docker Desktop. WSL stops a distro with no session attached: keep one, e.g. a startup task running `wsl.exe -d <distro> -u root -- sleep infinity` |
 
 ## Sizing jobs
 

@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
 	"github.com/kylepantall/runner-warden/internal/backend/docker"
+	"github.com/kylepantall/runner-warden/internal/backend/linuxhost"
+	"github.com/kylepantall/runner-warden/internal/backend/winvm"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 	"github.com/kylepantall/runner-warden/internal/daemon"
@@ -45,7 +49,7 @@ func daemonCmd() *cobra.Command {
 					return fmt.Errorf("job slice: %w", err)
 				}
 			}
-			binds, env, err := prepareCaches(cfg)
+			binds, env, err := prepareCaches(cfg.Caches)
 			if err != nil {
 				return err
 			}
@@ -81,6 +85,14 @@ func daemonCmd() *cobra.Command {
 							return nil, nil, err
 						}
 						bs[core.Linux] = b
+						if len(cfg.Linux.Hosts) > 0 {
+							pool, err := newLinuxHosts(cfg, hostID, exe, b, log)
+							if err != nil {
+								return nil, nil, err
+							}
+							bs[core.Linux] = pool
+							loops["linux-hosts"] = func(ctx context.Context) error { pool.Loop(ctx); return ctx.Err() }
+						}
 						dc, err := dockerclient.NewClientWithOpts(dockerclient.WithHost("unix://"+cfg.Linux.DockerSocket), dockerclient.WithAPIVersionNegotiation())
 						if err != nil {
 							return nil, nil, err
@@ -125,10 +137,10 @@ func daemonCmd() *cobra.Command {
 
 // prepareCaches creates cache directories with the configured owner and
 // mode and returns the binds and env vars for runners and job containers.
-func prepareCaches(cfg *config.Config) ([]string, map[string]string, error) {
+func prepareCaches(caches []config.Cache) ([]string, map[string]string, error) {
 	var binds []string
 	env := map[string]string{}
-	for _, c := range cfg.Caches {
+	for _, c := range caches {
 		if c.Mode != "shared" {
 			return nil, nil, fmt.Errorf("cache %q: mode %q is not supported yet; use shared", c.Name, c.Mode)
 		}
@@ -155,4 +167,30 @@ func prepareCaches(cfg *config.Config) ([]string, map[string]string, error) {
 		}
 	}
 	return binds, env, nil
+}
+
+// newLinuxHosts wraps this host's Docker backend with the [[linux.host]]
+// machines, reached over SSH with linux.ssh_key_file.
+func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend, log *slog.Logger) (*linuxhost.Pool, error) {
+	signer, _, err := winvm.EnsureKey(cfg.Linux.SSHKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("linux host ssh key: %w", err)
+	}
+	agent := linuxhost.AgentConfig{
+		Instance: cfg.Instance, Prefix: cfg.Prefix, HostID: hostID, Image: cfg.Linux.Image,
+		RunnerUID: cfg.Linux.RunnerUID, TmpfsSize: int64(cfg.Linux.TmpfsSize), OOMScoreAdj: cfg.Linux.OOMScoreAdj,
+		AllowedBinds: cfg.Linux.AllowedBinds, Caches: cfg.Caches, LogLevel: cfg.LogLevel,
+	}
+	var hosts []*linuxhost.Host
+	for _, h := range cfg.Linux.Hosts {
+		hosts = append(hosts, linuxhost.NewHost(linuxhost.HostConfig{
+			Name: h.Name, Exec: h.Exec, Binary: h.Binary, Agent: agent, Version: version, Self: exe,
+			Cmd: winvm.NewSSHCommander(winvm.SSHConfig{
+				Addr: h.SSHAddr(), User: h.SSHUser, Signer: signer,
+				KnownHosts: filepath.Join(cfg.StateDir, "linux", h.Name, "known_hosts"),
+			}),
+			Log: log.With("backend", "linux", "host", h.Name),
+		}))
+	}
+	return linuxhost.NewPool(local, hosts, log.With("backend", "linux")), nil
 }
