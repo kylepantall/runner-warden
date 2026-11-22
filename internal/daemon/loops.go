@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"os"
+	"slices"
 	"time"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/core"
 	"github.com/kylepantall/runner-warden/internal/hookapi"
 	"github.com/kylepantall/runner-warden/internal/scheduler"
@@ -339,6 +341,49 @@ func (d *Daemon) windowsIdleLoop(ctx context.Context) error {
 	}
 }
 
+// autoCacheEvery is how often automatic caches are measured and trimmed.
+const autoCacheEvery = 30 * time.Minute
+
+// autoCacheLoop measures this host's automatic caches for status and removes
+// the least recently used scopes not in use once they outgrow
+// auto_cache.max_size.
+func (d *Daemon) autoCacheLoop(ctx context.Context) error {
+	t := time.NewTicker(autoCacheEvery)
+	defer t.Stop()
+	base := AutoCacheDir(d.cfg.Instance)
+	for {
+		if us, err := autocache.Scan(base); err != nil {
+			d.log.Warn("automatic cache scan failed", "error", err.Error())
+		} else {
+			d.mu.Lock()
+			inUse := map[string]bool{}
+			for _, r := range d.runners {
+				if r.cache != "" {
+					inUse[r.cache] = true
+				}
+			}
+			d.mu.Unlock()
+			gone, err := autocache.Evict(base, us, int64(d.cfg.AutoCache.MaxSize), inUse)
+			for _, g := range gone {
+				d.log.Info("automatic cache removed", "scope", g.Scope, "bytes", g.Bytes, "last_used", g.LastUsed)
+			}
+			if err != nil {
+				d.log.Warn("automatic cache eviction failed", "error", err.Error())
+			}
+			d.mu.Lock()
+			d.caches = slices.DeleteFunc(us, func(u autocache.Usage) bool {
+				return slices.ContainsFunc(gone, func(g autocache.Usage) bool { return g.Scope == u.Scope })
+			})
+			d.mu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
 // packagesEvery is how often windows.package is re-checked on members that
 // are up (a VM just booted, a host back online).
 const packagesEvery = 2 * time.Minute
@@ -392,6 +437,10 @@ type StatusReport struct {
 	VMsUp     map[string]int64 `json:"vms_up,omitempty"`
 	// WindowsHosts are remote Windows hosts and whether they answer.
 	WindowsHosts map[string]bool `json:"windows_hosts,omitempty"`
+	// AutoCaches are this host's automatic caches, most recently used first,
+	// as last measured; AutoCacheMax is their budget.
+	AutoCaches   []autocache.Usage `json:"auto_caches,omitempty"`
+	AutoCacheMax int64             `json:"auto_cache_max,omitempty"`
 	// LinuxHosts maps every [[linux.host]] to reachable or not, in
 	// LinuxHostNames order.
 	LinuxHosts     map[string]bool `json:"linux_hosts,omitempty"`
@@ -442,6 +491,8 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 		rs = append(rs, *r)
 	}
 	rep.Persistent = append(rep.Persistent, d.persist...)
+	rep.AutoCaches = append(rep.AutoCaches, d.caches...)
+	rep.AutoCacheMax = int64(d.cfg.AutoCache.MaxSize)
 	d.mu.Unlock()
 	for _, rr := range rs {
 		s := RunnerStatus{Name: rr.name, Target: rr.lane.Target.String(), OS: string(rr.lane.OS), Lane: rr.lane.Lane, VM: rr.vm, Started: rr.started, RunID: rr.runID}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/admission"
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/backend/hostpool"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -52,6 +53,7 @@ type Daemon struct {
 	events    map[int64]eventRec // run id -> event name, for stale-PR checks
 	evPruned  time.Time
 	persist   []core.PersistentContainer // last sample, for status
+	caches    []autocache.Usage          // last automatic-cache scan, for status
 }
 
 // eventRec remembers a run's event; entries expire (a run's first job
@@ -102,6 +104,7 @@ type runnerRec struct {
 	handle   core.Handle
 	started  time.Time
 	vm       string
+	cache    string // automatic-cache scope on this host, "" for none
 	lastCPU  float64
 	lastLog  int64
 	lastIO   int64
@@ -290,6 +293,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.mu.Unlock()
 	run("monitor", d.monitor)
+	if d.cfg.Linux.Enabled && d.cfg.AutoCache.On() {
+		run("auto-cache", d.autoCacheLoop)
+	}
 	run("reconcile", d.reconcileLoop)
 	run("stale", d.staleLoop)
 	run("finished-runs", d.finishedRunsLoop)
@@ -442,6 +448,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	if g.Host != "" {
 		spec.Env[hostpool.HostEnv] = g.Host
 	}
+	scope := d.autoCache(&spec, l, g)
 	if l.OS == core.Linux {
 		if img := d.cfg.Linux.ResolveImage(d.runnerImage(ctx, g)); img != "" && g.Host != "" {
 			spec.Image = img // the host pulls it, falling back to the default
@@ -524,7 +531,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	if g.Host != "" {
 		vm = g.Host // shown as the runner's machine
 	}
-	rr := &runnerRec{name: name, lane: l, ghID: ghID, handle: h, started: now, vm: vm, activeAt: now}
+	rr := &runnerRec{name: name, lane: l, ghID: ghID, handle: h, started: now, vm: vm, activeAt: now, cache: scope}
 	// A job may have started before we registered the runner (the Started
 	// event only updated the store then).
 	if sr, ok, _ := d.store.GetRunner(name); ok && sr.JobRunID != 0 {
@@ -749,3 +756,38 @@ func (d *Daemon) groupFor(owner, repo string) string {
 
 // WindowsVMEnv carries the chosen VM name to the Windows backend.
 const WindowsVMEnv = "RUNNER_WARDEN_VM"
+
+// AutoCacheDir holds the instance's automatic caches, on this host and on
+// every [[linux.host]] (the same path there).
+func AutoCacheDir(instance string) string { return filepath.Join(config.CacheDir, instance, "auto") }
+
+// autoCache mounts the job's automatic cache into a Linux runner and points
+// the tools at it. It returns the scope when the cache is on this host.
+// [[cache]] entries setting the same variables win.
+func (d *Daemon) autoCache(spec *core.RunnerSpec, l scheduler.LaneKey, g scheduler.Grant) string {
+	if l.OS != core.Linux || !d.cfg.AutoCache.On() {
+		return ""
+	}
+	scope := autocache.Scope(d.cfg.AutoCache.Scope, l.Target, g.Job)
+	if scope == "" {
+		return ""
+	}
+	base := AutoCacheDir(d.cfg.Instance)
+	keep := map[string]bool{}
+	for _, c := range d.cfg.Caches {
+		if c.Env != "" {
+			keep[c.Env] = true
+		}
+	}
+	spec.Mounts = append(spec.Mounts, autocache.Mount(base, scope))
+	for k, v := range autocache.EnvFor(keep) {
+		spec.Env[k] = v
+	}
+	if g.Host != "" {
+		return "" // the host's backend creates the dir; its usage stays there
+	}
+	if err := autocache.Touch(base, scope, d.cfg.Linux.RunnerUID); err != nil {
+		d.log.Warn("automatic cache unavailable", "scope", scope, "error", err.Error())
+	}
+	return scope
+}

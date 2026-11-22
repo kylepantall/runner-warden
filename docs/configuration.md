@@ -29,6 +29,10 @@ allowed_images = ["ghcr.io/my-org/*"]  # images repos may pick in .github/runner
 name = "desktop"
 packages = ["clang", "cmake", "ninja-build", "pkg-config", "libgtk-3-dev"]
 
+[auto_cache]                     # warm tool and package caches for Linux jobs, no setup needed
+scope = "repo"                   # repo (default) | org (repos of an owner share: warmer, must trust each other) | off
+max_size = "50GiB"               # least recently used caches are removed past this
+
 [[cache]]                        # shared host dirs, mounted into runners and job containers
 name = "pub"
 host_path = "/opt/ci-cache/flutter-pub"
@@ -183,6 +187,26 @@ Declare what jobs need; runner-warden installs it, so new machines need nothing 
 |---|---|---|
 | Linux | `[[linux.build]] name + packages`, used by `[[cost]] image = "<name>"` | Builds `FROM linux.image` with the apt packages on first use, on this host and on each `[[linux.host]]`. The tag hashes the base and packages, so an edit means a fresh build and an unchanged one is never rebuilt |
 | Windows | `[[windows.package]] id + override` | Installs, with winget, each package a VM or host doesn't list: every 2 minutes for members that are up, and before a job on a member not yet checked. `override` (installer arguments) only applies at first install |
+
+## Automatic caches
+
+Every Linux runner gets its scope's cache dir at `/opt/rw-cache`, and the tools are pointed into it, so the second job is warm without any workflow change.
+
+| Variable | Cached |
+|---|---|
+| `RUNNER_TOOL_CACHE`, `AGENT_TOOLSDIRECTORY` | Versions setup-dotnet/node/java/go/python/dart/terraform download |
+| `NUGET_PACKAGES`, `npm_config_cache`, `YARN_CACHE_FOLDER`, `PIP_CACHE_DIR` | Package downloads |
+| `GOMODCACHE`, `GOCACHE` | Go modules and build cache |
+| `GRADLE_USER_HOME`, `PUB_CACHE` | Gradle and pub |
+
+| Aspect | Behaviour |
+|---|---|
+| Scope | `repo`: per repo. `org`: per owner. A runner uses the scope of the job it was started for; on an org lane GitHub can, rarely, hand it another job of the same org |
+| Precedence | A `[[cache]]` that sets the same variable wins; a job's own `env:` wins over both |
+| Hot path | Each scope records its last use. Every 30 minutes this host measures them (`status` shows a CACHES table) and removes the least recently used scopes not in use until they fit `max_size` |
+| Linux hosts | Get the same dirs (created for the runner user); their size is not managed from here yet |
+| Windows, macOS | Their tool cache and the guest user's home already persist |
+| With `actions/cache` | Still downloads on a hit: skip it on self-hosted runners (`if: runner.environment != 'self-hosted'`) to gain the time |
 
 ## Per-project runner images
 
