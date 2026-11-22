@@ -886,3 +886,51 @@ func TestMacJobsRunOnlyOnMacHosts(t *testing.T) {
 		t.Fatalf("a waiting mac job must not hold back linux jobs here: %+v %v", g, ok)
 	}
 }
+
+func TestJobPinnedToMachine(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.Costs = []admission.Rule{
+			{Match: "a/r/ci.yml/pc*", Machine: "pc"},
+			{Match: "a/r/ci.yml/here*", Machine: "local"},
+		}
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 1}, {Name: "pc2", Slots: 1}}
+	})
+	j1 := h.assign(lane("a", 1), h.job("a", "pc one"))
+	if g, ok := h.startsFor(j1.JobID); !ok || g.Host != "pc" {
+		t.Fatalf("pinned job goes to its machine though this host is free: %+v %v", g, ok)
+	}
+	j2 := h.assign(lane("a", 2), h.job("a", "pc two"))
+	if _, ok := h.startsFor(j2.JobID); ok {
+		t.Fatal("pinned job waits for its busy machine, never another one")
+	}
+	j3 := h.assign(lane("a", 3), h.job("a", "here"))
+	if g, ok := h.startsFor(j3.JobID); !ok || g.Host != "" {
+		t.Fatalf(`machine = "local" runs here: %+v %v`, g, ok)
+	}
+}
+
+func TestWindowsJobPinnedToHost(t *testing.T) {
+	win := LaneKey{core.ScaleSetKey{Target: core.Target{Owner: "a"}, OS: core.Windows}, 1}
+	idle := true
+	h := newHarness(t, func(o *Options) {
+		o.CPUBudget, o.DefaultJobCPU = 4000, 2000
+		o.Lanes = append(o.Lanes, win)
+		o.Costs = []admission.Rule{{Match: "a/r/ci.yml/*", Machine: "pc"}}
+		o.VMCost = func(LaneKey) (int64, bool) { return 8 * gib, true }
+		o.VMNamed = func(name string) (int64, bool, bool, bool) { return 0, true, name == "pc", idle }
+	})
+	idle = false
+	j := h.assign(win, h.job("a", "w"))
+	if _, ok := h.startsFor(j.JobID); ok {
+		t.Fatal("busy pinned host: wait")
+	}
+	idle = true
+	h.tick(time.Second)
+	g, ok := h.startsFor(j.JobID)
+	if !ok || g.Machine != "pc" {
+		t.Fatalf("%+v %v", g, ok)
+	}
+	if got := h.s.Snapshot().Ledger.CPUReserved; got != 0 {
+		t.Fatalf("remote pinned job charged %d here", got)
+	}
+}

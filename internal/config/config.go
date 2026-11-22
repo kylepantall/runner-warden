@@ -327,6 +327,10 @@ type Cost struct {
 	// Local keeps matching jobs on this host, never on a [[linux.host]]
 	// (jobs with devices or pinned cores always stay).
 	Local bool `toml:"local"`
+	// Machine runs matching jobs only on this machine, waiting for it when
+	// it is busy: a [[linux.host]], [[macos.host]], [[windows.vm]] or
+	// [[windows.host]] name, or "local" for this host.
+	Machine string `toml:"machine"`
 }
 
 // Target is an org or repo that runners serve.
@@ -684,8 +688,11 @@ func (c *Config) Validate() error {
 		} else if _, err := path.Match(co.Match, ""); err != nil {
 			add("cost[%d]: bad pattern %q: %w", i, co.Match, err)
 		}
-		if co.Mem <= 0 {
+		if co.Mem <= 0 && !co.Local && co.Machine == "" {
 			add("cost[%d]: mem is required", i)
+		}
+		if co.Machine != "" && co.Machine != "local" && !vmNames[co.Machine] {
+			add("cost[%d]: machine %q is not a configured host or vm (or \"local\")", i, co.Machine)
 		}
 		if co.CPUs < 0 {
 			add("cost[%d]: cpus must not be negative", i)

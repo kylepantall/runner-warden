@@ -199,6 +199,7 @@ func New(o Options) (*Daemon, error) {
 			_, mem, up := d.win.Peek(l.Target)
 			return mem, up
 		}
+		so.VMNamed = d.win.PeekNamed
 		so.RemoteVM = func(l scheduler.LaneKey) bool {
 			vm, _, up := d.win.Peek(l.Target)
 			return up && d.win.IsRemote(vm)
@@ -459,7 +460,12 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 			return "", errors.New("windows is not enabled")
 		}
 		var ok bool
-		if vm, ok = d.win.Pick(l.Target); !ok {
+		if g.Machine != "" {
+			vm, ok = d.win.PickNamed(g.Machine, l.Target)
+		} else {
+			vm, ok = d.win.Pick(l.Target)
+		}
+		if !ok {
 			return "", errors.New("no idle windows vm serves this target")
 		}
 		if err := d.win.EnsureUp(ctx, vm); err != nil {

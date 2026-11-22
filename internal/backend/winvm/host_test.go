@@ -129,3 +129,27 @@ func TestProvisionRefusesHost(t *testing.T) {
 		t.Fatal("host script must trust the key")
 	}
 }
+
+func TestPickNamed(t *testing.T) {
+	f := newHostFixture(t)
+	tgt := core.Target{Owner: "o"}
+	if _, ok := f.pool.PickNamed("pc", tgt); ok {
+		t.Fatal("a down host is never picked")
+	}
+	if _, _, remote, idle := f.pool.PeekNamed("pc"); !remote || idle {
+		t.Fatal("down host: remote, not idle")
+	}
+	f.setUp("pc", time.Now())
+	if vm, ok := f.pool.PickNamed("pc", tgt); !ok || vm != "pc" {
+		t.Fatalf("%q %v", vm, ok)
+	}
+	if _, ok := f.pool.PickNamed("pc", tgt); ok {
+		t.Fatal("claimed host picked twice")
+	}
+	if _, ok := f.pool.PickNamed("nope", tgt); ok {
+		t.Fatal("unknown vm")
+	}
+	if mem, up, _, idle := f.pool.PeekNamed("a"); up || !idle || mem == 0 {
+		t.Fatal("stopped local vm can boot")
+	}
+}

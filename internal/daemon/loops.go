@@ -15,6 +15,8 @@ type WindowsPool interface {
 	core.Backend
 	scheduler.VMProbe
 	Pick(t core.Target) (vm string, ok bool)
+	PickNamed(vm string, t core.Target) (string, bool)
+	PeekNamed(vm string) (mem int64, up, remote, idle bool)
 	Peek(t core.Target) (vm string, mem int64, up bool)
 	Release(vm string)
 	EnsureUp(ctx context.Context, vm string) error
