@@ -19,14 +19,15 @@ type Rule struct {
 	CPU         int64 // shared millicpus, 0 = default
 	Devices     []string
 	Image       string
-	Local       bool // never on a remote host
+	Local       bool   // never on a remote host
+	Machine     string // only on this machine ("local" = this host)
 }
 
 // RulesFromConfig converts config [[cost]] entries, keeping their order.
 func RulesFromConfig(cs []config.Cost) []Rule {
 	out := make([]Rule, len(cs))
 	for i, c := range cs {
-		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, CPU: MilliCPU(c.CPUs), Devices: c.Devices, Image: c.Image, Local: c.Local}
+		out[i] = Rule{Match: c.Match, Mem: int64(c.Mem), PinnedCores: c.PinnedCores, CPU: MilliCPU(c.CPUs), Devices: c.Devices, Image: c.Image, Local: c.Local, Machine: c.Machine}
 	}
 	return out
 }

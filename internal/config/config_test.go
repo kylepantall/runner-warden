@@ -193,3 +193,16 @@ func TestMacHosts(t *testing.T) {
 		t.Error("macos target without [macos] must fail")
 	}
 }
+
+func TestCostMachine(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[linux.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n"
+	if _, err := Load(write(t, base+"[[cost]]\nmatch=\"o/r/w.yml/j\"\nmachine=\"pc\"\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(write(t, base+"[[cost]]\nmatch=\"o/r/w.yml/j\"\nmachine=\"local\"\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(write(t, base+"[[cost]]\nmatch=\"o/r/w.yml/j\"\nmachine=\"ghost\"\n")); err == nil {
+		t.Fatal("unknown machine accepted")
+	}
+}

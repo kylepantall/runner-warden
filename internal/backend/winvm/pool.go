@@ -386,6 +386,37 @@ func (p *Pool) Peek(target core.Target) (vm string, mem int64, up bool) {
 	return cold, int64(p.vms[cold].Mem), false
 }
 
+// PickNamed is Pick for one VM or host (a job pinned to it): it claims vm when
+// it serves target and is idle, booting a stopped local VM within the licence
+// cap. A down host is never picked.
+func (p *Pool) PickNamed(vm string, target core.Target) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v, ok := p.vms[vm]
+	if !ok || !v.Serves(target) || p.busyLocked(vm) {
+		return "", false
+	}
+	if !p.up[vm] && (v.IsRemote() || p.licencesLocked(vm) >= p.licenceCap()) {
+		return "", false
+	}
+	p.claimed[vm] = true
+	return vm, true
+}
+
+// PeekNamed reports, without claiming, whether PickNamed(vm) would succeed
+// now (idle), the memory a stopped local VM reserves, and whether vm is up or
+// a remote host. It never blocks.
+func (p *Pool) PeekNamed(vm string) (mem int64, up, remote, idle bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v, ok := p.vms[vm]
+	if !ok {
+		return 0, false, false, false
+	}
+	idle = !p.busyLocked(vm) && (p.up[vm] || (!v.IsRemote() && p.licencesLocked(vm) < p.licenceCap()))
+	return int64(v.Mem), p.up[vm], v.IsRemote(), idle
+}
+
 // Release drops a claim made by Pick that will not reach Start.
 func (p *Pool) Release(vm string) {
 	p.mu.Lock()

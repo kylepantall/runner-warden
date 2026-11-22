@@ -33,7 +33,8 @@ type jobRec struct {
 	pinned    int
 	devices   []string
 	image     string
-	local     bool // must run on this host (rule, devices or pinned cores)
+	local     bool   // must run on this host (rule, devices or pinned cores)
+	machine   string // must run on this machine (rule), "" for any
 	age       time.Time
 	ageKey    string
 	seq       int
@@ -395,7 +396,7 @@ func setJob(r *jobRec, j core.Job) {
 // runs on those and takes no shared CPU.
 func (s *Scheduler) applyRule(r *jobRec) {
 	j := r.job
-	r.cost, r.cpu, r.pinned, r.devices, r.image, r.local = s.o.DefaultJobMem, s.o.DefaultJobCPU, 0, nil, "", false
+	r.cost, r.cpu, r.pinned, r.devices, r.image, r.local, r.machine = s.o.DefaultJobMem, s.o.DefaultJobCPU, 0, nil, "", false, ""
 	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
 		if rule.Mem > 0 {
 			r.cost = rule.Mem
@@ -404,7 +405,10 @@ func (s *Scheduler) applyRule(r *jobRec) {
 			r.cpu = rule.CPU
 		}
 		r.pinned = rule.PinnedCores
-		r.devices, r.image, r.local = rule.Devices, rule.Image, rule.Local
+		r.devices, r.image, r.local, r.machine = rule.Devices, rule.Image, rule.Local, rule.Machine
+		if r.machine == "local" {
+			r.local, r.machine = true, ""
+		}
 	}
 	if r.pinned > 0 {
 		r.cpu = 0
@@ -1170,7 +1174,7 @@ func (s *Scheduler) oldestWaiter() *admission.Waiter {
 	var ws []admission.Waiter
 	for _, r := range s.heads() {
 		// A job only hosts can run never waits for this host's memory.
-		if s.fitsEver(r) && !s.o.HostsOnly[r.lane.OS] {
+		if s.fitsEver(r) && !s.o.HostsOnly[r.lane.OS] && !s.pinnedRemote(r) {
 			ws = append(ws, s.waiter(r))
 		}
 	}
@@ -1283,6 +1287,9 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	}
 	s.seq++
 	tok := fmt.Sprintf("r%d", s.seq)
+	if rec.machine != "" {
+		return s.grantPinned(rec, tok, blocked)
+	}
 	if s.remoteVM(rec.lane) { // takes nothing here, like a Linux host
 		s.led.Force(tok, admission.Request{})
 		s.startRunner(rec, tok, s.seq, admission.Reservation{}, false, "", "")
@@ -1307,35 +1314,114 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	return true
 }
 
+// grantPinned starts a runner for a job pinned to one machine, or leaves it
+// waiting until that machine can take it.
+// A blocked job may still take a remote machine: it competes with nothing
+// here.
+func (s *Scheduler) grantPinned(rec *jobRec, tok string, blocked bool) bool {
+	if s.vmManaged(rec.lane) {
+		if s.o.VMNamed == nil {
+			return false
+		}
+		mem, up, remote, idle := s.o.VMNamed(rec.machine)
+		if !idle {
+			return false
+		}
+		if remote {
+			s.led.Force(tok, admission.Request{})
+			s.startRunner(rec, tok, s.seq, admission.Reservation{}, false, "", "")
+			s.runners[tok].remote = true
+			return true
+		}
+		if blocked {
+			return false
+		}
+		vm := int64(0)
+		if !up {
+			vm = mem
+		}
+		res, vmKey, ok := s.reserveWithVM(rec, tok, s.fullReq(rec), vm)
+		if !ok {
+			return false
+		}
+		s.startRunner(rec, tok, s.seq, res, false, vmKey, "")
+		return true
+	}
+	if !s.hostOK(rec.machine, rec.lane) {
+		return false
+	}
+	s.led.Force(tok, admission.Request{})
+	s.startRunner(rec, tok, s.seq, admission.Reservation{}, false, "", rec.machine)
+	return true
+}
+
+// pinnedRemote reports a job pinned to another machine.
+func (s *Scheduler) pinnedRemote(r *jobRec) bool {
+	if r.machine == "" {
+		return false
+	}
+	if !s.vmManaged(r.lane) {
+		return true
+	}
+	if s.o.VMNamed == nil {
+		return false
+	}
+	_, _, remote, _ := s.o.VMNamed(r.machine)
+	return remote
+}
+
+// hostOK reports whether remote host name serves lk and has a free slot now.
+func (s *Scheduler) hostOK(name string, lk LaneKey) bool {
+	for _, h := range s.o.LinuxHosts {
+		if h.Name == name {
+			return s.hostFree(h, lk)
+		}
+	}
+	return false
+}
+
 // freeHost is the first reachable remote host with a free slot serving the
 // lane's target, or "".
 func (s *Scheduler) freeHost(lk LaneKey) string {
-	used := map[string]int{}
-	for _, rr := range s.runners {
-		if rr.host != "" {
-			used[rr.host]++
-		}
-	}
 	for _, h := range s.o.LinuxHosts {
-		os := h.OS
-		if os == "" {
-			os = core.Linux
+		if s.hostFree(h, lk) {
+			return h.Name
 		}
-		if os != lk.OS || used[h.Name] >= h.Slots || (h.Serves != nil && !h.Serves(lk.Target)) {
-			continue
-		}
-		if s.o.HostUp != nil && !s.o.HostUp(h.Name) {
-			continue
-		}
-		return h.Name
 	}
 	return ""
+}
+
+// hostFree reports whether h runs lk's OS and target, is reachable and has a
+// free slot.
+func (s *Scheduler) hostFree(h RemoteHost, lk LaneKey) bool {
+	os := h.OS
+	if os == "" {
+		os = core.Linux
+	}
+	if os != lk.OS || (h.Serves != nil && !h.Serves(lk.Target)) {
+		return false
+	}
+	used := 0
+	for _, rr := range s.runners {
+		if rr.host == h.Name {
+			used++
+		}
+	}
+	if used >= h.Slots {
+		return false
+	}
+	return s.o.HostUp == nil || s.o.HostUp(h.Name)
 }
 
 // reserveRunner reserves tok and, on a VM-managed lane with no suitable VM up,
 // the memory of the VM that StartRunner is about to boot, or nothing.
 func (s *Scheduler) reserveRunner(rec *jobRec, tok string, req admission.Request) (admission.Reservation, string, bool) {
-	vm := s.vmNeed(rec.lane)
+	return s.reserveWithVM(rec, tok, req, s.vmNeed(rec.lane))
+}
+
+// reserveWithVM reserves tok and, when vm > 0, the memory of the VM that
+// StartRunner is about to boot.
+func (s *Scheduler) reserveWithVM(rec *jobRec, tok string, req admission.Request, vm int64) (admission.Reservation, string, bool) {
 	withVM := req
 	withVM.Mem += vm
 	if !s.led.CanFit(withVM) {
@@ -1371,6 +1457,9 @@ func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.
 	s.runners[tok] = rr
 	rec.rr, rec.phase = rr, pStarting
 	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job, Devices: rec.devices, Image: rec.image, Host: host}
+	if s.vmManaged(rec.lane) {
+		g.Machine = rec.machine
+	}
 	lk := rec.lane
 	s.log.info("starting runner", "job", rec.id, "lane", lk.Lane, "mem", res.Mem, "parked", parked, "host", host)
 	s.effect(func(ctx context.Context) {
@@ -1463,7 +1552,7 @@ func (s *Scheduler) promote() {
 			)
 		})
 		for _, rec := range cs {
-			if local, _ := s.canStartRunner(rec.lane.Target); !local || s.o.HostsOnly[rec.lane.OS] {
+			if local, _ := s.canStartRunner(rec.lane.Target); !local || s.o.HostsOnly[rec.lane.OS] || rec.machine != "" {
 				continue
 			}
 			s.seq++

@@ -36,6 +36,7 @@ type Grant struct {
 	Devices  []string // host devices from the matching cost rule
 	Image    string   // runner image from the matching cost rule, "" for default
 	Host     string   // remote Linux host the runner goes to, "" for this host
+	Machine  string   // Windows VM or host the job is pinned to, "" for any
 }
 
 // Runners starts and stops runners; implemented by the daemon over backends
@@ -138,6 +139,10 @@ type Options struct {
 	// job's own cost is then overhead only, because the VM's memory is what the
 	// job uses. Nil keeps the plain per-job cost on every lane.
 	VMCost func(LaneKey) (vmMem int64, alreadyUp bool)
+	// VMNamed serves Windows jobs pinned to one VM or host: its memory,
+	// whether it is up or a remote host, and whether it can take a job now.
+	// Same rules as VMCost. Nil = pinning to a Windows machine never grants.
+	VMNamed func(name string) (mem int64, up, remote, idle bool)
 	// RemoteVM reports that a Windows lane's next job goes to a separate
 	// machine, which takes none of this host's CPU. It runs under the
 	// scheduler lock and must not block. Nil = never.

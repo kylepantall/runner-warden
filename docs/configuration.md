@@ -40,6 +40,7 @@ cpus = 4                         # optional: shared logical CPUs (ignored with p
 devices = ["/dev/kvm"]           # optional: host devices for matching jobs
 image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file)
 local = true                     # optional: never on a [[linux.host]] (devices/pinned cores imply it)
+machine = "pc-wsl"               # optional: only on this machine (any host or vm name, or "local"), waiting while it is busy
 
 [hang]
 idle = "30m"                     # no CPU, IO or job output
@@ -160,6 +161,7 @@ A `[[macos.host]]` runs macOS jobs in a tart VM on another Mac, one at a time. W
 | A job needs lots of memory (emulators, big builds) | Add a `[[cost]]` rule. Until it fits, the job waits in GitHub's queue, its timeout not ticking |
 | CPU-heavy jobs (Gradle, compilers, VMs) | `cpus = N` on their rule. A job starts only when its memory and CPU both fit; pinned cores' threads count against `cpu_budget` |
 | Timing-sensitive tests | `pinned_cores = N` on their rule |
+| A job must run on one machine (a device attached to it, its toolchain, testing it) | `machine = "<name>"` on its rule. It waits for that machine instead of running elsewhere; `"local"` means this host |
 | Small, fast jobs | Leave them at or below `light_threshold` so they overtake held heavy jobs |
 
 The slice's `MemoryMax` is the backstop: a job that exceeds its estimate is OOM-killed (reported in `status` and logs) instead of the host freezing.
