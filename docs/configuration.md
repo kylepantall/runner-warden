@@ -115,6 +115,19 @@ A `[[windows.host]]` runs Windows jobs on another machine, one at a time, like a
 | Per job | Ephemeral JIT runner, work dir wiped, tool cache kept at `<work_dir>\_tool` |
 | Limits | The machine must stay on and reachable; runner-warden cannot restart it. Hang detection reads whole-machine CPU and the runner logs |
 
+## Linking machines
+
+`sudo runner-warden host add` writes the `[[linux.host]]`, `[[windows.host]]` or `[[macos.host]]` entry for you (keeping a backup and your comments), enables the section and adds the OS to the targets it serves.
+
+| Kind | You do on the machine | The wizard checks / fixes |
+|---|---|---|
+| `linux` | Add the shown key to `~/.ssh/authorized_keys` (root, or a user with passwordless sudo) | root, systemd, Docker Engine (installs `docker.io` on apt distros) |
+| `wsl` | Run the shown PowerShell once, elevated (OpenSSH Server + key) | picks the distro; root, systemd, Docker Engine (installs it), a keep-alive startup task (adds it) |
+| `windows` | Run the shown PowerShell once, elevated | installs the baseline and runner files over SSH |
+| `macos` | Turn on Remote Login, add the shown key | picks a running tart VM; guest agent, Xcode, guest uid |
+
+Every question has a flag (`--kind --address --user --name --targets --distro --vm --jobs`); `--yes` takes defaults and accepts fixes, `--no-restart` leaves the restart to you. `runner-warden host list` shows linked machines.
+
 ## Linux hosts
 
 A `[[linux.host]]` takes Linux jobs this host cannot fit. It runs the same Docker backend, driven over SSH; the daemon keeps the scale sets and the scheduler.

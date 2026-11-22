@@ -34,6 +34,8 @@ sudo runner-warden setup --prefix my-ci --org my-org --repo me/tool
 
 Then change workflows to `runs-on: my-ci-linux` (setup opens a PR per repo for you). `runs-on: my-ci` also works for Linux.
 
+More machines: run `sudo runner-warden host add` once per machine. It asks what kind of machine it is and how to reach it, shows the one step to run there (trusting this instance's SSH key), checks it, offers to fix what's missing (Docker Engine in WSL, a WSL keep-alive task) and restarts the service.
+
 `runner-warden` is a single binary in `/usr/local/bin`: `runner-warden --help` lists every command, and `sudo runner-warden update` keeps it current. `setup` also enables `runner-warden-update.timer`, which runs `update` daily around 04:00–06:00 (`setup --auto-update=false` turns it off).
 
 Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user with `repo` (+ `admin:org` for orgs, `workflow` for the label sweep).
@@ -51,7 +53,9 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | `migrate apply\|retire\|rollback` | Label sweep and retirement of old runners |
 | `migrate check [--save]` | Re-scan for jobs still on old labels (e.g. branches older than the sweep); exit 3 if any, so it can run from cron or CI |
 | `windows provision\|adopt <vm>` | Create a Windows VM, or take over an existing dockurr disk |
-| `windows host-script\|host-setup <host>` | Prepare a separate Windows machine as a host |
+| `host add` | Wizard: link another machine (Linux, WSL on a Windows PC, Windows, Mac with tart) over SSH, check and fix it, add it to the config |
+| `host list` | Linked machines and whether they are reachable |
+| `windows host-script\|host-setup <host>` | Prepare a separate Windows machine as a host by hand |
 | `config validate` | Validate the config |
 | `update [--check]` | Update to the latest release (checksum + signature verified), then restart instances; running jobs survive |
 | `uninstall [--purge]` | Stop the service, delete its scale sets, containers, VM containers and slice; `--purge` also removes config, token and state |

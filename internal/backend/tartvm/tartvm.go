@@ -89,6 +89,7 @@ func (h *Host) template() string { return base + h.cfg.Instance + `/template"` }
 func (h *Host) dir(runner string) string {
 	return base + h.cfg.Instance + `/runners/` + runner + `"`
 }
+
 // tools is the tool cache shared by every job (setup-* actions, kept SDKs):
 // the runner dir, and its default _work/_tool, go after each job.
 func (h *Host) tools() string { return base + h.cfg.Instance + `/_tool"` }
