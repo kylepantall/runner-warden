@@ -33,6 +33,7 @@ type jobRec struct {
 	pinned    int
 	devices   []string
 	image     string
+	local     bool // must run on this host (rule, devices or pinned cores)
 	age       time.Time
 	ageKey    string
 	seq       int
@@ -59,6 +60,7 @@ type runnerRec struct {
 	jobDone   bool // job-completed hook seen: a later exit is normal
 	released  bool
 	vmKey     string // ledger key of the pending VM reservation, "" once converted
+	host      string // remote Linux host; its runners reserve nothing here
 }
 
 type laneRec struct {
@@ -211,6 +213,14 @@ func (s *Scheduler) lane(lk LaneKey) *laneRec {
 }
 
 func (s *Scheduler) overhead() admission.Request { return admission.Request{Mem: s.o.RunnerOverhead} }
+
+// charge is what rr holds in this host's ledger: nothing on a remote host.
+func charge(rr *runnerRec, req admission.Request) admission.Request {
+	if rr.host != "" {
+		return admission.Request{}
+	}
+	return req
+}
 
 // vmManaged reports lanes whose jobs run in a VM the scheduler budgets for.
 func (s *Scheduler) vmManaged(lk LaneKey) bool {
@@ -380,7 +390,7 @@ func setJob(r *jobRec, j core.Job) {
 // runs on those and takes no shared CPU.
 func (s *Scheduler) applyRule(r *jobRec) {
 	j := r.job
-	r.cost, r.cpu, r.pinned, r.devices, r.image = s.o.DefaultJobMem, s.o.DefaultJobCPU, 0, nil, ""
+	r.cost, r.cpu, r.pinned, r.devices, r.image, r.local = s.o.DefaultJobMem, s.o.DefaultJobCPU, 0, nil, "", false
 	if rule, ok := admission.MatchRule(s.o.Costs, j.Owner, j.Repo, j.WorkflowRef, j.Name); ok {
 		if rule.Mem > 0 {
 			r.cost = rule.Mem
@@ -389,11 +399,13 @@ func (s *Scheduler) applyRule(r *jobRec) {
 			r.cpu = rule.CPU
 		}
 		r.pinned = rule.PinnedCores
-		r.devices, r.image = rule.Devices, rule.Image
+		r.devices, r.image, r.local = rule.Devices, rule.Image, rule.Local
 	}
 	if r.pinned > 0 {
 		r.cpu = 0
 	}
+	// Host devices and pinned cores are this machine's.
+	r.local = r.local || r.pinned > 0 || len(r.devices) > 0
 }
 
 // updateJob takes newer job details and re-applies the cost rule when they
@@ -414,7 +426,7 @@ func (s *Scheduler) updateJob(r *jobRec, j core.Job) {
 	}
 	s.log.info("job cost updated", "job", r.id, "from", old, "to", r.cost, "cpu_from", oldCPU, "cpu_to", r.cpu)
 	if rr := r.rr; rr != nil && rr.full && rr.job == r {
-		_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, r))
+		_, _ = s.led.ForceResize(rr.tok, charge(rr, s.reqFor(rr, r)))
 	}
 }
 
@@ -557,7 +569,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 	rec.unboundAt = time.Time{}
 	rec.startedAt = s.now()
 	if rr.full {
-		_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, rec))
+		_, _ = s.led.ForceResize(rr.tok, charge(rr, s.reqFor(rr, rec)))
 	} else {
 		rr.parked = true // waits in the hook until the ledger grants the rest
 	}
@@ -568,7 +580,7 @@ func (s *Scheduler) onStarted(lk LaneKey, j core.Job) {
 func (s *Scheduler) shrink(rr *runnerRec) {
 	req := s.overhead()
 	req.PinnedCores = s.heldCores(rr) // the cpuset stays with the container
-	_, _ = s.led.ForceResize(rr.tok, req)
+	_, _ = s.led.ForceResize(rr.tok, charge(rr, req))
 	rr.full, rr.parked, rr.hookOK = false, false, false
 }
 
@@ -783,14 +795,14 @@ func (s *Scheduler) Restore(rs []RestoredRunner) {
 			}
 			s.lane(r.Lane)
 			s.seq++
-			rr := &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: r.Name, lane: r.Lane, createdAt: r.Created}
+			rr := &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: r.Name, lane: r.Lane, createdAt: r.Created, host: r.Host}
 			if rr.createdAt.IsZero() {
 				rr.createdAt = s.now()
 			}
 			s.runners[rr.tok] = rr
 			s.byName[rr.name] = rr
 			if r.Job == nil && !r.Started {
-				s.led.Force(rr.tok, s.overhead())
+				s.led.Force(rr.tok, charge(rr, s.overhead()))
 				continue
 			}
 			var jb core.Job
@@ -814,7 +826,7 @@ func (s *Scheduler) Restore(rs []RestoredRunner) {
 			}
 			rec.rr, rr.job = rr, rec
 			rr.full = true
-			s.led.Force(rr.tok, s.fullReq(rec))
+			s.led.Force(rr.tok, charge(rr, s.fullReq(rec)))
 			if r.Started {
 				rec.phase = pBound
 				rec.startedAt = rr.createdAt
@@ -835,7 +847,7 @@ func (s *Scheduler) HookCompleted(req HookRequest) bool {
 		if rr := s.lookup(req); rr != nil {
 			if rr.job == nil { // its job started while we were down
 				rec := s.bindFromHook(rr, req)
-				_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, rec))
+				_, _ = s.led.ForceResize(rr.tok, charge(rr, s.reqFor(rr, rec)))
 				rr.full, rr.hookOK = true, true
 			}
 			rr.jobDone = true
@@ -1227,9 +1239,13 @@ func (s *Scheduler) grantLoop() {
 	}
 }
 
+// liveCounts counts runners: all on this host (max_runners is a host limit),
+// and the target's on every machine.
 func (s *Scheduler) liveCounts(t core.Target) (all, target int) {
 	for _, rr := range s.runners {
-		all++
+		if rr.host == "" {
+			all++
+		}
 		if rr.lane.Target == t {
 			target++
 		}
@@ -1250,17 +1266,52 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 		s.log.info("parked job granted", "job", rec.id, "runner", rec.rr.name)
 		return true
 	}
-	if !s.canStartRunner(rec.lane.Target) {
+	local, target := s.canStartRunner(rec.lane.Target)
+	if !target {
 		return false
 	}
 	s.seq++
 	tok := fmt.Sprintf("r%d", s.seq)
-	res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec))
-	if !ok {
+	if local {
+		if res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec)); ok {
+			s.startRunner(rec, tok, s.seq, res, false, vmKey, "")
+			return true
+		}
+	}
+	if rec.local {
 		return false
 	}
-	s.startRunner(rec, tok, s.seq, res, false, vmKey)
+	host := s.freeHost(rec.lane)
+	if host == "" {
+		return false
+	}
+	s.led.Force(tok, admission.Request{})
+	s.startRunner(rec, tok, s.seq, admission.Reservation{}, false, "", host)
 	return true
+}
+
+// freeHost is the first reachable remote host with a free slot serving the
+// lane's target, or "".
+func (s *Scheduler) freeHost(lk LaneKey) string {
+	if lk.OS != core.Linux {
+		return ""
+	}
+	used := map[string]int{}
+	for _, rr := range s.runners {
+		if rr.host != "" {
+			used[rr.host]++
+		}
+	}
+	for _, h := range s.o.LinuxHosts {
+		if used[h.Name] >= h.Slots || (h.Serves != nil && !h.Serves(lk.Target)) {
+			continue
+		}
+		if s.o.HostUp != nil && !s.o.HostUp(h.Name) {
+			continue
+		}
+		return h.Name
+	}
+	return ""
 }
 
 // reserveRunner reserves tok and, on a VM-managed lane with no suitable VM up,
@@ -1287,24 +1338,23 @@ func (s *Scheduler) reserveRunner(rec *jobRec, tok string, req admission.Request
 	return res, key, true
 }
 
-func (s *Scheduler) canStartRunner(t core.Target) bool {
-	all, target := s.liveCounts(t)
-	if s.o.MaxRunners > 0 && all >= s.o.MaxRunners {
-		return false
+// canStartRunner reports room for a runner on this host (max_runners) and
+// for the target on any machine (its max).
+func (s *Scheduler) canStartRunner(t core.Target) (local, target bool) {
+	all, n := s.liveCounts(t)
+	if m := s.o.Targets[t].Max; m > 0 && n >= m {
+		return false, false
 	}
-	if m := s.o.Targets[t].Max; m > 0 && target >= m {
-		return false
-	}
-	return true
+	return s.o.MaxRunners <= 0 || all < s.o.MaxRunners, true
 }
 
-func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool, vmKey string) {
-	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey}
+func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool, vmKey, host string) {
+	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey, host: host}
 	s.runners[tok] = rr
 	rec.rr, rec.phase = rr, pStarting
-	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job, Devices: rec.devices, Image: rec.image}
+	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job, Devices: rec.devices, Image: rec.image, Host: host}
 	lk := rec.lane
-	s.log.info("starting runner", "job", rec.id, "lane", lk.Lane, "mem", res.Mem, "parked", parked)
+	s.log.info("starting runner", "job", rec.id, "lane", lk.Lane, "mem", res.Mem, "parked", parked, "host", host)
 	s.effect(func(ctx context.Context) {
 		name, err := s.o.Runners.StartRunner(ctx, lk, g)
 		s.locked(func() {
@@ -1395,7 +1445,7 @@ func (s *Scheduler) promote() {
 			)
 		})
 		for _, rec := range cs {
-			if !s.canStartRunner(rec.lane.Target) {
+			if local, _ := s.canStartRunner(rec.lane.Target); !local {
 				continue
 			}
 			s.seq++
@@ -1409,7 +1459,7 @@ func (s *Scheduler) promote() {
 				continue
 			}
 			s.log.info("promoting held job to parked runner", "job", rec.id, "lane", rec.lane.Lane)
-			s.startRunner(rec, tok, s.seq, res, true, vmKey)
+			s.startRunner(rec, tok, s.seq, res, true, vmKey, "")
 			return
 		}
 	}
@@ -1623,7 +1673,7 @@ func (s *Scheduler) mergePhantom(incoming *jobRec) {
 		rr.job, incoming.rr = incoming, rr
 		incoming.phase = pStarting
 		if rr.full {
-			_, _ = s.led.ForceResize(rr.tok, s.reqFor(rr, incoming))
+			_, _ = s.led.ForceResize(rr.tok, charge(rr, s.reqFor(rr, incoming)))
 		}
 	}
 	s.forget(ph)

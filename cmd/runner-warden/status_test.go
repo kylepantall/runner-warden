@@ -69,33 +69,40 @@ func TestFrameRedrawsInPlace(t *testing.T) {
 
 func TestRenderStatusShowsMachines(t *testing.T) {
 	rep := daemon.StatusReport{
-		Hostname:     "box",
-		VMsUp:        map[string]int64{"build": 8 << 30},
-		WindowsVMs:   []string{"build", "spare"},
-		WindowsHosts: map[string]bool{"pc": true},
+		Hostname:       "box",
+		VMsUp:          map[string]int64{"build": 8 << 30},
+		WindowsVMs:     []string{"build", "spare"},
+		WindowsHosts:   map[string]bool{"pc": true},
+		LinuxHosts:     map[string]bool{"pc-wsl": true},
+		LinuxHostNames: []string{"pc-wsl"},
 		Runners: []daemon.RunnerStatus{
 			{Name: "r-lin", OS: "linux", RunID: 1, Alive: true},
 			{Name: "r-win", OS: "windows", VM: "pc", RunID: 2, Alive: true},
+			{Name: "r-wsl", OS: "linux", VM: "pc-wsl", RunID: 3, Alive: true},
 		},
 		Scheduler: scheduler.Status{Lanes: []scheduler.LaneStatus{
 			{Name: "o/windows/l1", Jobs: []scheduler.JobStatus{{Repo: "app", Name: "w", Runner: "r-win"}}},
+			{Name: "o/linux/l2", Jobs: []scheduler.JobStatus{{Repo: "app", Name: "l", Runner: "r-wsl"}}},
 		}},
 	}
 	var b bytes.Buffer
 	renderStatus(&b, rep)
 	out := b.String()
-	for _, want := range []string{"MACHINE", "box", "build", "spare", "pc"} {
+	for _, want := range []string{"MACHINE", "box", "build", "spare", "pc", "linux host"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
-	var jobLine string
+	var jobLine, wslLine string
 	for _, l := range strings.Split(out, "\n") {
 		if strings.HasPrefix(l, "o/windows/l1") {
 			jobLine = l
 		}
+		if strings.HasPrefix(l, "o/linux/l2") {
+			wslLine = l
+		}
 	}
-	if !strings.Contains(jobLine, " pc ") {
-		t.Fatalf("job row must name the machine its runner is on: %q", jobLine)
+	if !strings.Contains(jobLine, " pc ") || !strings.Contains(wslLine, " pc-wsl ") {
+		t.Fatalf("job rows must name the machine their runner is on: %q %q", jobLine, wslLine)
 	}
 }

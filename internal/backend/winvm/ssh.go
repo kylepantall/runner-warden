@@ -69,6 +69,20 @@ func NewSSHExec(cfg SSHConfig) Exec {
 	return &sshExec{cfg: cfg}
 }
 
+// Commander runs a plain command line over SSH, without PowerShell wrapping;
+// stdin is fed to it. A non-zero exit is not an error.
+type Commander interface {
+	Command(ctx context.Context, cmd, stdin string) (stdout, stderr string, exit int, err error)
+}
+
+// NewSSHCommander returns a Commander that dials a fresh connection per call.
+func NewSSHCommander(cfg SSHConfig) Commander { return NewSSHExec(cfg).(*sshExec) }
+
+// Command implements Commander.
+func (x *sshExec) Command(ctx context.Context, cmd, stdin string) (string, string, int, error) {
+	return x.exec(ctx, cmd, stdin)
+}
+
 // encodePS is the -EncodedCommand form: base64 of UTF-16LE.
 func encodePS(script string) string {
 	u := utf16.Encode([]rune(script))

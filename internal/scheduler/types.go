@@ -35,6 +35,7 @@ type Grant struct {
 	Job      core.Job
 	Devices  []string // host devices from the matching cost rule
 	Image    string   // runner image from the matching cost rule, "" for default
+	Host     string   // remote Linux host the runner goes to, "" for this host
 }
 
 // Runners starts and stops runners; implemented by the daemon over backends
@@ -141,6 +142,21 @@ type Options struct {
 	// machine, which takes none of this host's CPU. It runs under the
 	// scheduler lock and must not block. Nil = never.
 	RemoteVM func(LaneKey) bool
+
+	// LinuxHosts are separate machines Linux jobs overflow to when this
+	// host's ledger cannot fit them. Their runners reserve nothing here.
+	LinuxHosts []RemoteHost
+	// HostUp reports a remote host reachable. It runs under the scheduler
+	// lock and must not block. Nil = always.
+	HostUp func(name string) bool
+}
+
+// RemoteHost is a machine that runs up to Slots jobs at once for the targets
+// Serves accepts.
+type RemoteHost struct {
+	Name   string
+	Slots  int
+	Serves func(core.Target) bool
 }
 
 // OptionsFromConfig fills the config-driven fields. lanes lists every lane the
@@ -290,4 +306,5 @@ type RestoredRunner struct {
 	Created time.Time
 	Job     *core.Job // job bound to the runner, if known
 	Started bool      // the job has started (otherwise it is still unstarted)
+	Host    string    // remote Linux host it runs on, "" for this host
 }

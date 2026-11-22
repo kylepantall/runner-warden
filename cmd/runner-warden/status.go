@@ -138,10 +138,10 @@ func frame(text string, width, height int) string {
 	return b.String()
 }
 
-// machineOf names where a runner runs: this host for Linux, the VM or host
-// for Windows.
+// machineOf names where a runner runs: its VM or remote host, else this host
+// for Linux.
 func machineOf(rep daemon.StatusReport, r daemon.RunnerStatus) string {
-	if r.OS == "windows" {
+	if r.OS == "windows" || r.VM != "" {
 		return dash(r.VM)
 	}
 	return dash(rep.Hostname)
@@ -174,6 +174,13 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 	mw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(mw, "MACHINE\tKIND\tSTATE\tRESERVED\tJOBS")
 	fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", dash(rep.Hostname), "this host", "up", size(s.Ledger.Reserved)+" of "+size(s.Ledger.Budget), busyOn[dash(rep.Hostname)])
+	for _, h := range rep.LinuxHostNames {
+		state := "reachable"
+		if !rep.LinuxHosts[h] {
+			state = "UNREACHABLE"
+		}
+		fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", h, "linux host", state, "-", busyOn[h])
+	}
 	vms := rep.WindowsVMs
 	if len(vms) == 0 { // daemon older than the client
 		vms = slices.Sorted(maps.Keys(rep.VMsUp))

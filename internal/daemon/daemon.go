@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/admission"
+	"github.com/kylepantall/runner-warden/internal/backend/linuxhost"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 	gh "github.com/kylepantall/runner-warden/internal/github"
@@ -79,6 +80,12 @@ type githubAPI interface {
 // proxy) lives in the daemon process and must be rebuilt for adopted runners.
 type adopter interface {
 	Adopt(ctx context.Context, h core.Handle) error
+}
+
+// linuxHosts is implemented by a Linux backend with [[linux.host]] machines.
+type linuxHosts interface {
+	IsUp(name string) bool // never blocks
+	HostsUp() map[string]bool
 }
 
 // persistentReporter is implemented by backends whose jobs can leave
@@ -195,6 +202,12 @@ func New(o Options) (*Daemon, error) {
 			vm, _, up := d.win.Peek(l.Target)
 			return up && d.win.IsRemote(vm)
 		}
+	}
+	if lh, ok := d.backends[core.Linux].(linuxHosts); ok {
+		for _, h := range c.Linux.Hosts {
+			so.LinuxHosts = append(so.LinuxHosts, scheduler.RemoteHost{Name: h.Name, Slots: h.MaxConcurrent, Serves: h.Serves})
+		}
+		so.HostUp = lh.IsUp
 	}
 	if cores, err := admission.ReadTopology(""); err == nil {
 		so.Cores = cores
@@ -405,8 +418,13 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		Devices:  g.Devices,
 		Env:      map[string]string{},
 	}
+	if g.Host != "" {
+		spec.Env[linuxhost.HostEnv] = g.Host
+	}
 	if l.OS == core.Linux {
-		if img := d.runnerImage(ctx, g); img != "" {
+		if img := d.runnerImage(ctx, g); img != "" && g.Host != "" {
+			spec.Image = img // the host pulls it, falling back to the default
+		} else if img != "" {
 			if ie, ok := b.(imageEnsurer); ok {
 				if err := ie.EnsureImage(ctx, img); err != nil {
 					d.log.Warn("job image unavailable, using default", "image", img, "error", err.Error())
@@ -451,7 +469,9 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	if err := d.store.UpsertRunner(rec); err != nil {
 		d.log.Warn("store runner failed", "runner", name, "error", err.Error())
 	}
-	err = d.startHookSocket(l.OS, name)
+	if g.Host == "" { // remote runners run without hooks
+		err = d.startHookSocket(l.OS, name)
+	}
 	var h core.Handle
 	if err == nil {
 		h, err = b.Start(ctx, spec)
@@ -467,6 +487,9 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		return "", fmt.Errorf("start runner: %w", err)
 	}
 	_, _ = d.store.SetRunnerBackendID(name, h.BackendID)
+	if g.Host != "" {
+		vm = g.Host // shown as the runner's machine
+	}
 	rr := &runnerRec{name: name, lane: l, ghID: ghID, handle: h, started: now, vm: vm, activeAt: now}
 	// A job may have started before we registered the runner (the Started
 	// event only updated the store then).
@@ -477,7 +500,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 	d.mu.Lock()
 	d.runners[name] = rr
 	d.mu.Unlock()
-	d.log.Info("runner started", "runner", name, "lane", l.Lane, "target", l.Target.String(), "os", string(l.OS), "mem", g.MemBytes, "parked", g.Parked, "cpuset", g.CPUSet, "image", spec.Image)
+	d.log.Info("runner started", "runner", name, "lane", l.Lane, "target", l.Target.String(), "os", string(l.OS), "mem", g.MemBytes, "parked", g.Parked, "cpuset", g.CPUSet, "image", spec.Image, "host", g.Host)
 	return name, nil
 }
 
@@ -613,10 +636,16 @@ func (d *Daemon) restore(ctx context.Context) error {
 				d.log.Error("adopting runner failed", "runner", r.Name, "error", err.Error())
 			}
 		}
-		if err := d.startHookSocket(lane.OS, r.Name); err != nil {
-			d.log.Error("hook socket for adopted runner failed", "runner", r.Name, "error", err.Error())
+		host := ""
+		if lane.OS == core.Linux {
+			host, _ = linuxhost.HostOf(h.BackendID)
 		}
-		rr := &runnerRec{name: r.Name, lane: lane, ghID: r.GitHubRunnerID, handle: h, started: r.Created, activeAt: time.Now()}
+		if host == "" {
+			if err := d.startHookSocket(lane.OS, r.Name); err != nil {
+				d.log.Error("hook socket for adopted runner failed", "runner", r.Name, "error", err.Error())
+			}
+		}
+		rr := &runnerRec{name: r.Name, lane: lane, ghID: r.GitHubRunnerID, handle: h, started: r.Created, activeAt: time.Now(), vm: host}
 		if lane.OS == core.Windows {
 			rr.vm = h.BackendID // the VM or host the runner sits on
 		}
@@ -638,7 +667,7 @@ func (d *Daemon) restore(ctx context.Context) error {
 			d.noteEvent(job.RunID, job.Event)
 		}
 		d.mu.Unlock()
-		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil || busy[r.Name]})
+		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil || busy[r.Name], Host: host})
 	}
 	if len(restored) > 0 {
 		d.log.Info("adopted runners after restart", "count", len(restored))

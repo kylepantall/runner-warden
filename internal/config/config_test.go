@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/kylepantall/runner-warden/internal/core"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,33 @@ func TestWindowsHostRejects(t *testing.T) {
 		"bad logon":    "[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\ntask_logon=\"Batch\"\n",
 		"user in addr": "[[windows.host]]\nname=\"pc\"\naddress=\"me@pc\"\ntargets=[\"*\"]\n",
 		"dup name":     "[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n[[windows.host]]\nname=\"pc\"\naddress=\"pc2\"\ntargets=[\"*\"]\n",
+	} {
+		if _, err := Load(write(t, base+s)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestLinuxHosts(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n"
+	c, err := Load(write(t, base+"[[linux.host]]\nname=\"pc-wsl\"\naddress=\"pc.tail\"\nexec=\"wsl -u root --\"\ntargets=[\"o\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := c.Linux.Hosts[0]
+	if h.SSHAddr() != "pc.tail:22" || h.SSHUser != "root" || h.MaxConcurrent != 2 || h.Binary != "/usr/local/bin/runner-warden" {
+		t.Fatalf("defaults %+v", h)
+	}
+	if c.Linux.SSHKeyFile != c.Windows.SSHKeyFile || !h.Serves(core.Target{Owner: "o", Repo: "r"}) || h.Serves(core.Target{Owner: "x"}) {
+		t.Fatalf("key %s / serves", c.Linux.SSHKeyFile)
+	}
+	for name, s := range map[string]string{
+		"no address": "[[linux.host]]\nname=\"pc\"\ntargets=[\"*\"]\n",
+		"no targets": "[[linux.host]]\nname=\"pc\"\naddress=\"pc\"\n",
+		"bad binary": "[[linux.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\nbinary=\"rw; rm\"\n",
+		"neg slots":  "[[linux.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\nmax_concurrent=-1\n",
+		"dup name":   "[[linux.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n[[linux.host]]\nname=\"pc\"\naddress=\"pc2\"\ntargets=[\"*\"]\n",
+		"bad name":   "[[linux.host]]\nname=\"PC\"\naddress=\"pc\"\ntargets=[\"*\"]\n",
 	} {
 		if _, err := Load(write(t, base+s)); err == nil {
 			t.Errorf("%s: expected error", name)

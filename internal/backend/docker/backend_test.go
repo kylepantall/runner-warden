@@ -242,6 +242,26 @@ func TestBuildRunnerContainer(t *testing.T) {
 	}
 }
 
+func TestNoHooksRunner(t *testing.T) {
+	b := testBackend(t, &fakeAPI{})
+	b.cfg.NoHooks = true
+	spec := core.RunnerSpec{Name: testRunner, JITConfig: "JIT"}
+	cfg, hc := b.buildRunnerContainer(spec, b.runnerDir(spec.Name), b.proxySock(spec.Name), 0)
+	for _, e := range cfg.Env {
+		if strings.HasPrefix(e, "ACTIONS_RUNNER_HOOK_") || strings.HasPrefix(e, "RUNNER_WARDEN_SOCKET=") {
+			t.Errorf("hook env %s", e)
+		}
+	}
+	for _, bd := range hc.Binds {
+		if strings.HasPrefix(bd, b.cfg.HookBinary+":") || strings.HasPrefix(bd, b.hookDir(testRunner)+":") {
+			t.Errorf("hook bind %s", bd)
+		}
+	}
+	if _, err := b.Start(context.Background(), spec); err != nil {
+		t.Fatalf("no hook dir is needed without hooks: %v", err)
+	}
+}
+
 func TestHookWrapperQuoting(t *testing.T) {
 	s := hookWrapper("/opt/it's here/rw", "job-started")
 	if !strings.HasPrefix(s, "#!/bin/sh\n") || !strings.Contains(s, `'/opt/it'\''s here/rw' hook job-started`) {
