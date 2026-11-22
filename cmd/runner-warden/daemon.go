@@ -80,6 +80,7 @@ func daemonCmd() *cobra.Command {
 							PersistentNames: cfg.Linux.PersistentNames,
 							CacheBinds:      binds,
 							CacheEnv:        env,
+							Builds:          cfg.Linux.BuiltImages(),
 							LogLevel:        cfg.LogLevel,
 							Log:             log.With("backend", "linux"),
 						})
@@ -190,6 +191,7 @@ func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend
 		Instance: cfg.Instance, Prefix: cfg.Prefix, HostID: hostID, Image: cfg.Linux.Image,
 		RunnerUID: cfg.Linux.RunnerUID, TmpfsSize: int64(cfg.Linux.TmpfsSize), OOMScoreAdj: cfg.Linux.OOMScoreAdj,
 		AllowedBinds: cfg.Linux.AllowedBinds, Caches: cfg.Caches, LogLevel: cfg.LogLevel,
+		Builds: cfg.Linux.BuiltImages(),
 	}
 	var hosts []hostpool.Member
 	for _, h := range cfg.Linux.Hosts {

@@ -4,6 +4,7 @@ import (
 	"github.com/kylepantall/runner-warden/internal/core"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,5 +205,36 @@ func TestCostMachine(t *testing.T) {
 	}
 	if _, err := Load(write(t, base+"[[cost]]\nmatch=\"o/r/w.yml/j\"\nmachine=\"ghost\"\n")); err == nil {
 		t.Fatal("unknown machine accepted")
+	}
+}
+
+func TestLinuxBuildsAndWindowsPackages(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\nimage=\"base:1\"\n"
+	c, err := Load(write(t, base+"[[linux.build]]\nname=\"desk\"\npackages=[\"libgtk-3-dev\",\"clang\"]\n[[cost]]\nmatch=\"o/r/w.yml/j\"\nmem=\"1GiB\"\nimage=\"desk\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag := c.Linux.ResolveImage("desk")
+	df, ok := c.Linux.BuiltImages()[tag]
+	if !ok || !strings.HasPrefix(tag, "runner-warden-build/desk:") || !strings.HasPrefix(df, "FROM base:1\n") || !strings.Contains(df, "clang libgtk-3-dev") {
+		t.Fatalf("%s %q", tag, df)
+	}
+	if c.Linux.ResolveImage("ghcr.io/x/y:1") != "ghcr.io/x/y:1" {
+		t.Fatal("other refs pass through")
+	}
+	c.Linux.Image = "base:2"
+	if c.Linux.ResolveImage("desk") == tag {
+		t.Fatal("a new base must give a new tag")
+	}
+	for name, s := range map[string]string{
+		"bad pkg":   "[[linux.build]]\nname=\"d\"\npackages=[\"gtk; rm -rf /\"]\n",
+		"no pkgs":   "[[linux.build]]\nname=\"d\"\n",
+		"dup":       "[[linux.build]]\nname=\"d\"\npackages=[\"a\"]\n[[linux.build]]\nname=\"d\"\npackages=[\"b\"]\n",
+		"bad winid": "[windows]\nenabled=true\n[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n[[windows.package]]\nid=\"a b\"\n",
+		"quote ov":  "[windows]\nenabled=true\n[[windows.host]]\nname=\"pc\"\naddress=\"pc\"\ntargets=[\"*\"]\n[[windows.package]]\nid=\"X.Y\"\noverride=\"'; evil\"\n",
+	} {
+		if _, err := Load(write(t, base+s)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
 	}
 }

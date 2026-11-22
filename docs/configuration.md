@@ -25,6 +25,10 @@ tmpfs_size = "8GiB"              # /tmp in runner containers
 persistent_names = ["my-device-*"]  # containers jobs create with a matching name outlive the runner
 allowed_images = ["ghcr.io/my-org/*"]  # images repos may pick in .github/runner-warden.yml; empty = off
 
+[[linux.build]]                  # a runner image runner-warden builds: linux.image + apt packages
+name = "desktop"
+packages = ["clang", "cmake", "ninja-build", "pkg-config", "libgtk-3-dev"]
+
 [[cache]]                        # shared host dirs, mounted into runners and job containers
 name = "pub"
 host_path = "/opt/ci-cache/flutter-pub"
@@ -38,7 +42,7 @@ mem = "15GiB"
 pinned_cores = 3                 # optional: whole physical cores, SMT siblings together
 cpus = 4                         # optional: shared logical CPUs (ignored with pinned_cores)
 devices = ["/dev/kvm"]           # optional: host devices for matching jobs
-image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file)
+image = "ghcr.io/my-org/android-ci:1"  # optional: runner image for matching jobs (beats the repo file), or a [[linux.build]] name
 local = true                     # optional: never on a [[linux.host]] (devices/pinned cores imply it)
 machine = "pc-wsl"               # optional: only on this machine (any host or vm name, or "local"), waiting while it is busy
 
@@ -95,6 +99,10 @@ address = "mac.example.ts.net"
 ssh_user = "me"                  # owns the tart VM; key: macos.ssh_key_file (default windows.ssh_key_file)
 vm = "runner-xcode"              # a running tart VM with the guest agent
 targets = ["my-org"]             # add "macos" to the target's os list too
+
+[[windows.package]]              # kept installed on every Windows VM and host (winget)
+id = "Microsoft.VisualStudio.2022.BuildTools"
+override = "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
 [[windows.host]]                 # a separate Windows machine, driven over SSH
 name = "pc"
@@ -165,6 +173,15 @@ A `[[macos.host]]` runs macOS jobs in a tart VM on another Mac, one at a time. W
 | Small, fast jobs | Leave them at or below `light_threshold` so they overtake held heavy jobs |
 
 The slice's `MemoryMax` is the backstop: a job that exceeds its estimate is OOM-killed (reported in `status` and logs) instead of the host freezing.
+
+## Build tools
+
+Declare what jobs need; runner-warden installs it, so new machines need nothing by hand.
+
+| OS | Declare | runner-warden does |
+|---|---|---|
+| Linux | `[[linux.build]] name + packages`, used by `[[cost]] image = "<name>"` | Builds `FROM linux.image` with the apt packages on first use, on this host and on each `[[linux.host]]`. The tag hashes the base and packages, so an edit means a fresh build and an unchanged one is never rebuilt |
+| Windows | `[[windows.package]] id + override` | Installs, with winget, each package a VM or host doesn't list: every 2 minutes for members that are up, and before a job on a member not yet checked. `override` (installer arguments) only applies at first install |
 
 ## Per-project runner images
 

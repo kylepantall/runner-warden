@@ -17,6 +17,9 @@ type WindowsPool interface {
 	Pick(t core.Target) (vm string, ok bool)
 	PickNamed(vm string, t core.Target) (string, bool)
 	PeekNamed(vm string) (mem int64, up, remote, idle bool)
+	PackagesPending() []string
+	NeedsPackages(vm string) bool
+	EnsurePackages(ctx context.Context, vm string) ([]string, error)
 	Peek(t core.Target) (vm string, mem int64, up bool)
 	Release(vm string)
 	EnsureUp(ctx context.Context, vm string) error
@@ -332,6 +335,33 @@ func (d *Daemon) windowsIdleLoop(ctx context.Context) error {
 			for _, vm := range d.win.StopIdle(ctx, now) {
 				d.log.Info("windows vm stopped after idle", "vm", vm)
 			}
+		}
+	}
+}
+
+// packagesEvery is how often windows.package is re-checked on members that
+// are up (a VM just booted, a host back online).
+const packagesEvery = 2 * time.Minute
+
+// windowsPackagesLoop keeps windows.package installed on every VM and host.
+func (d *Daemon) windowsPackagesLoop(ctx context.Context) error {
+	t := time.NewTicker(packagesEvery)
+	defer t.Stop()
+	for {
+		for _, vm := range d.win.PackagesPending() {
+			got, err := d.win.EnsurePackages(ctx, vm)
+			if err != nil {
+				d.log.Warn("windows packages failed", "vm", vm, "error", err.Error())
+				continue
+			}
+			if len(got) > 0 {
+				d.log.Info("windows packages installed", "vm", vm, "packages", got)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
 		}
 	}
 }

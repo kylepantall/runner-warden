@@ -153,3 +153,37 @@ func TestPickNamed(t *testing.T) {
 		t.Fatal("stopped local vm can boot")
 	}
 }
+
+func TestEnsurePackages(t *testing.T) {
+	f := newHostFixture(t)
+	f.pool.cfg.Windows.Packages = []config.WindowsPackage{{ID: "Microsoft.VisualStudio.2022.BuildTools", Override: "--quiet --add Microsoft.VisualStudio.Workload.VCTools"}}
+	f.setUp("pc", time.Now())
+	if got := f.pool.PackagesPending(); len(got) != 1 || got[0] != "pc" || !f.pool.NeedsPackages("pc") {
+		t.Fatalf("pending %v", got)
+	}
+	fail := true
+	f.ex.handler = func(s, _ string) (string, string, int, error) {
+		if strings.Contains(s, "winget list") {
+			if fail {
+				return "failed Microsoft.VisualStudio.2022.BuildTools -1\n", "", 0, nil
+			}
+			return "installed Microsoft.VisualStudio.2022.BuildTools\n", "", 0, nil
+		}
+		return defaultGuest(s)
+	}
+	if _, err := f.pool.EnsurePackages(context.Background(), "pc"); err == nil || !f.pool.NeedsPackages("pc") {
+		t.Fatal("a failed install is reported and retried")
+	}
+	fail = false
+	got, err := f.pool.EnsurePackages(context.Background(), "pc")
+	if err != nil || len(got) != 1 || f.pool.NeedsPackages("pc") || len(f.pool.PackagesPending()) != 0 {
+		t.Fatalf("%v %v", got, err)
+	}
+	js, _ := f.ex.find("winget list")
+	if !strings.Contains(js.script, "ov = '--quiet --add Microsoft.VisualStudio.Workload.VCTools'") {
+		t.Fatal("override not passed")
+	}
+	if got, err := f.pool.EnsurePackages(context.Background(), "pc"); err != nil || got != nil {
+		t.Fatal("ensured packages are not re-run")
+	}
+}
