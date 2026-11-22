@@ -143,18 +143,22 @@ type Options struct {
 	// scheduler lock and must not block. Nil = never.
 	RemoteVM func(LaneKey) bool
 
-	// LinuxHosts are separate machines Linux jobs overflow to when this
-	// host's ledger cannot fit them. Their runners reserve nothing here.
+	// LinuxHosts are separate machines jobs of their OS overflow to when
+	// this host's ledger cannot fit them (macOS hosts too, despite the name).
+	// Their runners reserve nothing here.
 	LinuxHosts []RemoteHost
+	// HostsOnly lists OSes this machine cannot run: their jobs go to hosts.
+	HostsOnly map[core.OS]bool
 	// HostUp reports a remote host reachable. It runs under the scheduler
 	// lock and must not block. Nil = always.
 	HostUp func(name string) bool
 }
 
-// RemoteHost is a machine that runs up to Slots jobs at once for the targets
-// Serves accepts.
+// RemoteHost is a machine that runs up to Slots jobs of its OS at once for
+// the targets Serves accepts.
 type RemoteHost struct {
 	Name   string
+	OS     core.OS // default Linux
 	Slots  int
 	Serves func(core.Target) bool
 }

@@ -14,7 +14,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kylepantall/runner-warden/internal/backend/docker"
+	"github.com/kylepantall/runner-warden/internal/backend/hostpool"
 	"github.com/kylepantall/runner-warden/internal/backend/linuxhost"
+	"github.com/kylepantall/runner-warden/internal/backend/tartvm"
 	"github.com/kylepantall/runner-warden/internal/backend/winvm"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
@@ -113,6 +115,14 @@ func daemonCmd() *cobra.Command {
 						}
 						loops["imagegc"] = func(ctx context.Context) error { gc.Loop(ctx); return ctx.Err() }
 					}
+					if cfg.MacOS.Enabled {
+						pool, err := newMacHosts(cfg, hostID, log)
+						if err != nil {
+							return nil, nil, err
+						}
+						bs[core.MacOS] = pool
+						loops["mac-hosts"] = func(ctx context.Context) error { pool.Loop(ctx); return ctx.Err() }
+					}
 					var win daemon.WindowsPool
 					if cfg.Windows.Enabled {
 						p, err := newWindowsPool(cfg, hostID, log)
@@ -171,7 +181,7 @@ func prepareCaches(caches []config.Cache) ([]string, map[string]string, error) {
 
 // newLinuxHosts wraps this host's Docker backend with the [[linux.host]]
 // machines, reached over SSH with linux.ssh_key_file.
-func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend, log *slog.Logger) (*linuxhost.Pool, error) {
+func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend, log *slog.Logger) (*hostpool.Pool, error) {
 	signer, _, err := winvm.EnsureKey(cfg.Linux.SSHKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("linux host ssh key: %w", err)
@@ -181,7 +191,7 @@ func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend
 		RunnerUID: cfg.Linux.RunnerUID, TmpfsSize: int64(cfg.Linux.TmpfsSize), OOMScoreAdj: cfg.Linux.OOMScoreAdj,
 		AllowedBinds: cfg.Linux.AllowedBinds, Caches: cfg.Caches, LogLevel: cfg.LogLevel,
 	}
-	var hosts []*linuxhost.Host
+	var hosts []hostpool.Member
 	for _, h := range cfg.Linux.Hosts {
 		hosts = append(hosts, linuxhost.NewHost(linuxhost.HostConfig{
 			Name: h.Name, Exec: h.Exec, Binary: h.Binary, Agent: agent, Version: version, Self: exe,
@@ -192,5 +202,27 @@ func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend
 			Log: log.With("backend", "linux"), // Host adds "host" itself
 		}))
 	}
-	return linuxhost.NewPool(local, hosts, log.With("backend", "linux")), nil
+	return hostpool.NewPool(local, core.Caps{}, hosts, log.With("backend", "linux")), nil
+}
+
+// newMacHosts builds the macOS backend: [[macos.host]] Macs only, reached over
+// SSH with macos.ssh_key_file.
+func newMacHosts(cfg *config.Config, hostID string, log *slog.Logger) (*hostpool.Pool, error) {
+	signer, _, err := winvm.EnsureKey(cfg.MacOS.SSHKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("mac host ssh key: %w", err)
+	}
+	var hosts []hostpool.Member
+	for _, h := range cfg.MacOS.Hosts {
+		hosts = append(hosts, tartvm.New(tartvm.Config{
+			Name: h.Name, VM: h.VM, Tart: h.Tart, GuestUID: h.GuestUID,
+			Instance: cfg.Instance, Prefix: cfg.Prefix, HostID: hostID, RunnerVersion: cfg.MacOS.RunnerVersion,
+			Cmd: winvm.NewSSHCommander(winvm.SSHConfig{
+				Addr: h.SSHAddr(), User: h.SSHUser, Signer: signer,
+				KnownHosts: filepath.Join(cfg.StateDir, "macos", h.Name, "known_hosts"),
+			}),
+			Log: log.With("backend", "macos"),
+		}))
+	}
+	return hostpool.NewPool(nil, core.Caps{OS: core.MacOS}, hosts, log.With("backend", "macos")), nil
 }

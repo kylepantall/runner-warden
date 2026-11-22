@@ -857,3 +857,32 @@ func TestHeldOldJobDoesNotBlockOverflow(t *testing.T) {
 		t.Fatal("big job cannot fit yet")
 	}
 }
+
+func TestMacJobsRunOnlyOnMacHosts(t *testing.T) {
+	mac := LaneKey{core.ScaleSetKey{Target: core.Target{Owner: "a"}, OS: core.MacOS}, 1}
+	mac2 := LaneKey{mac.ScaleSetKey, 2}
+	h := newHarness(t, func(o *Options) {
+		o.Lanes = append(o.Lanes, mac, mac2)
+		o.DefaultJobMem = 2 * gib // above light_threshold: blockable
+		o.ReserveAfter = time.Minute
+		o.HostsOnly = map[core.OS]bool{core.MacOS: true}
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 1}, {Name: "mac", OS: core.MacOS, Slots: 1}}
+	})
+	free := h.free()
+	j := h.assign(mac, h.job("a", "ios"))
+	if g, ok := h.startsFor(j.JobID); !ok || g.Host != "mac" {
+		t.Fatalf("mac job goes to the mac: %+v %v", g, ok)
+	}
+	if h.free() != free {
+		t.Fatal("mac job reserved memory here")
+	}
+	j2 := h.assign(mac2, h.job("a", "ios2"))
+	h.tick(2 * time.Minute) // j2 waits for the busy mac past ReserveAfter
+	if _, ok := h.startsFor(j2.JobID); ok {
+		t.Fatal("one job per mac")
+	}
+	l := h.assign(lane("a", 1), h.job("a", "lin"))
+	if g, ok := h.startsFor(l.JobID); !ok || g.Host != "" {
+		t.Fatalf("a waiting mac job must not hold back linux jobs here: %+v %v", g, ok)
+	}
+}

@@ -1,22 +1,52 @@
-package linuxhost
+// Package hostpool combines this machine's backend for one OS with remote
+// hosts. A runner goes to a remote host when its spec carries HostEnv; its
+// handle's BackendID is then "<host>/<id on that host>", which is how every
+// later call finds the host.
+package hostpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/core"
 )
 
-// Local is this machine's Linux backend (the Docker backend).
+// HostEnv in a RunnerSpec's Env names the remote host to start it on. The
+// pool removes it before the spec reaches a backend.
+const HostEnv = "RUNNER_WARDEN_HOST"
+
+// HostOf splits a BackendID into the remote host and the id on that host;
+// host is "" for a runner on this machine.
+func HostOf(backendID string) (host, id string) {
+	if h, rest, ok := strings.Cut(backendID, "/"); ok {
+		return h, rest
+	}
+	return "", backendID
+}
+
+func onHost(host, id string) string { return host + "/" + id }
+
+// Local is this machine's backend for the OS (the Docker backend).
 type Local interface {
 	core.Backend
 	EnsureImage(ctx context.Context, ref string) error
 	Adopt(ctx context.Context, h core.Handle) error
 	Persistent(ctx context.Context) ([]core.PersistentContainer, error)
+}
+
+// Member is one remote host.
+type Member interface {
+	core.Backend
+	Name() string
+	Up() bool // never blocks
+	Probe(ctx context.Context) error
+	Adopt(ctx context.Context, h core.Handle) error
 }
 
 // listGrace is how long a host's last runner list stands in for one it
@@ -31,10 +61,12 @@ type listed struct {
 	hs []core.Handle
 }
 
-// Pool is the Linux backend: this machine plus the remote hosts.
+// Pool is one OS's backend: this machine (if it runs the OS) plus the remote
+// hosts.
 type Pool struct {
-	local Local
-	hosts map[string]*Host
+	local Local // nil when this machine cannot run the OS
+	caps  core.Caps
+	hosts map[string]Member
 	order []string
 	log   *slog.Logger
 
@@ -45,12 +77,16 @@ type Pool struct {
 
 var _ core.Backend = (*Pool)(nil)
 
-// NewPool combines local with hosts (probed by Prepare and Loop).
-func NewPool(local Local, hosts []*Host, log *slog.Logger) *Pool {
+// NewPool combines local (nil for none) with hosts, probed by Prepare and
+// Loop. caps describes the OS when local is nil.
+func NewPool(local Local, caps core.Caps, hosts []Member, log *slog.Logger) *Pool {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	p := &Pool{local: local, hosts: map[string]*Host{}, log: log, where: map[string]string{}, last: map[string]listed{}}
+	if local != nil {
+		caps = local.Caps()
+	}
+	p := &Pool{local: local, caps: caps, hosts: map[string]Member{}, log: log, where: map[string]string{}, last: map[string]listed{}}
 	for _, h := range hosts {
 		p.hosts[h.Name()] = h
 		p.order = append(p.order, h.Name())
@@ -77,7 +113,9 @@ func (p *Pool) HostsUp() map[string]bool {
 func (p *Pool) Hosts() []string { return append([]string(nil), p.order...) }
 
 // Caps implements core.Backend.
-func (p *Pool) Caps() core.Caps { return p.local.Caps() }
+func (p *Pool) Caps() core.Caps { return p.caps }
+
+var errNoLocal = errors.New("this machine does not run this OS")
 
 // PrepareTimeout bounds the hosts' first probe at daemon start.
 const PrepareTimeout = 3 * time.Minute
@@ -86,8 +124,10 @@ const PrepareTimeout = 3 * time.Minute
 // most PrepareTimeout: runners on a host are adopted only if it answers, and
 // an unreachable host must not hold up the daemon for long.
 func (p *Pool) Prepare(ctx context.Context) error {
-	if err := p.local.Prepare(ctx); err != nil {
-		return err
+	if p.local != nil {
+		if err := p.local.Prepare(ctx); err != nil {
+			return err
+		}
 	}
 	p.probeAll(ctx, PrepareTimeout)
 	return nil
@@ -119,7 +159,7 @@ func (p *Pool) Loop(ctx context.Context) {
 	}
 }
 
-func (p *Pool) host(name string) (*Host, error) {
+func (p *Pool) host(name string) (Member, error) {
 	if h := p.hosts[name]; h != nil {
 		return h, nil
 	}
@@ -136,6 +176,9 @@ func (p *Pool) note(runner, host string) {
 func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, error) {
 	name := spec.Env[HostEnv]
 	if name == "" {
+		if p.local == nil {
+			return core.Handle{}, errNoLocal
+		}
 		return p.local.Start(ctx, spec)
 	}
 	h, err := p.host(name)
@@ -155,9 +198,12 @@ func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 }
 
 // route finds the backend of a handle and the handle as that backend knows it.
-func (p *Pool) route(hd core.Handle) (core.Backend, *Host, core.Handle, error) {
+func (p *Pool) route(hd core.Handle) (core.Backend, Member, core.Handle, error) {
 	name, id := HostOf(hd.BackendID)
 	if name == "" {
+		if p.local == nil {
+			return nil, nil, hd, errNoLocal
+		}
 		return p.local, nil, hd, nil
 	}
 	h, err := p.host(name)
@@ -197,7 +243,10 @@ func (p *Pool) Cleanup(ctx context.Context, runner string) error {
 		}
 		return h.Cleanup(ctx, runner)
 	}
-	err := p.local.Cleanup(ctx, runner)
+	var err error
+	if p.local != nil {
+		err = p.local.Cleanup(ctx, runner)
+	}
 	for _, h := range p.hosts {
 		if h.Up() {
 			if herr := h.Cleanup(ctx, runner); herr != nil {
@@ -211,9 +260,12 @@ func (p *Pool) Cleanup(ctx context.Context, runner string) error {
 // List implements core.Backend. A host that cannot answer contributes its
 // last list for listGrace, then nothing.
 func (p *Pool) List(ctx context.Context) ([]core.Handle, error) {
-	out, err := p.local.List(ctx)
-	if err != nil {
-		return nil, err
+	var out []core.Handle
+	if p.local != nil {
+		var err error
+		if out, err = p.local.List(ctx); err != nil {
+			return nil, err
+		}
 	}
 	for _, name := range p.order {
 		h := p.hosts[name]
@@ -258,11 +310,17 @@ func (p *Pool) Adopt(ctx context.Context, hd core.Handle) error {
 		p.note(hd.RunnerName, h.Name())
 		return h.Adopt(ctx, rhd)
 	}
+	if p.local == nil {
+		return errNoLocal
+	}
 	return p.local.Adopt(ctx, hd)
 }
 
 // Persistent reports this machine's persistent containers (they count
 // against this machine's budget only).
 func (p *Pool) Persistent(ctx context.Context) ([]core.PersistentContainer, error) {
+	if p.local == nil {
+		return nil, nil
+	}
 	return p.local.Persistent(ctx)
 }

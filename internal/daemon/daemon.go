@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/admission"
-	"github.com/kylepantall/runner-warden/internal/backend/linuxhost"
+	"github.com/kylepantall/runner-warden/internal/backend/hostpool"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 	gh "github.com/kylepantall/runner-warden/internal/github"
@@ -82,7 +82,8 @@ type adopter interface {
 	Adopt(ctx context.Context, h core.Handle) error
 }
 
-// linuxHosts is implemented by a Linux backend with [[linux.host]] machines.
+// linuxHosts is implemented by a backend with remote hosts ([[linux.host]],
+// [[macos.host]]).
 type linuxHosts interface {
 	IsUp(name string) bool // never blocks
 	HostsUp() map[string]bool
@@ -203,11 +204,29 @@ func New(o Options) (*Daemon, error) {
 			return up && d.win.IsRemote(vm)
 		}
 	}
+	var pools []linuxHosts
 	if lh, ok := d.backends[core.Linux].(linuxHosts); ok {
+		pools = append(pools, lh)
 		for _, h := range c.Linux.Hosts {
-			so.LinuxHosts = append(so.LinuxHosts, scheduler.RemoteHost{Name: h.Name, Slots: h.MaxConcurrent, Serves: h.Serves})
+			so.LinuxHosts = append(so.LinuxHosts, scheduler.RemoteHost{Name: h.Name, OS: core.Linux, Slots: h.MaxConcurrent, Serves: h.Serves})
 		}
-		so.HostUp = lh.IsUp
+	}
+	if mh, ok := d.backends[core.MacOS].(linuxHosts); ok {
+		pools = append(pools, mh)
+		for _, h := range c.MacOS.Hosts {
+			so.LinuxHosts = append(so.LinuxHosts, scheduler.RemoteHost{Name: h.Name, OS: core.MacOS, Slots: 1, Serves: h.Serves})
+		}
+		so.HostsOnly = map[core.OS]bool{core.MacOS: true}
+	}
+	if len(pools) > 0 {
+		so.HostUp = func(name string) bool {
+			for _, p := range pools {
+				if p.IsUp(name) {
+					return true
+				}
+			}
+			return false
+		}
 	}
 	if cores, err := admission.ReadTopology(""); err == nil {
 		so.Cores = cores
@@ -419,7 +438,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		Env:      map[string]string{},
 	}
 	if g.Host != "" {
-		spec.Env[linuxhost.HostEnv] = g.Host
+		spec.Env[hostpool.HostEnv] = g.Host
 	}
 	if l.OS == core.Linux {
 		if img := d.runnerImage(ctx, g); img != "" && g.Host != "" {
@@ -637,8 +656,8 @@ func (d *Daemon) restore(ctx context.Context) error {
 			}
 		}
 		host := ""
-		if lane.OS == core.Linux {
-			host, _ = linuxhost.HostOf(h.BackendID)
+		if lane.OS != core.Windows {
+			host, _ = hostpool.HostOf(h.BackendID)
 		}
 		if host == "" {
 			if err := d.startHookSocket(lane.OS, r.Name); err != nil {
