@@ -307,4 +307,5 @@ type RestoredRunner struct {
 	Job     *core.Job // job bound to the runner, if known
 	Started bool      // the job has started (otherwise it is still unstarted)
 	Host    string    // remote Linux host it runs on, "" for this host
+	Remote  bool      // runs on another machine (a Windows host): reserves nothing here
 }

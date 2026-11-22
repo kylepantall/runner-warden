@@ -60,7 +60,8 @@ type runnerRec struct {
 	jobDone   bool // job-completed hook seen: a later exit is normal
 	released  bool
 	vmKey     string // ledger key of the pending VM reservation, "" once converted
-	host      string // remote Linux host; its runners reserve nothing here
+	host      string // remote Linux host
+	remote    bool   // on another machine (Linux or Windows host): reserves nothing here
 }
 
 type laneRec struct {
@@ -214,9 +215,10 @@ func (s *Scheduler) lane(lk LaneKey) *laneRec {
 
 func (s *Scheduler) overhead() admission.Request { return admission.Request{Mem: s.o.RunnerOverhead} }
 
-// charge is what rr holds in this host's ledger: nothing on a remote host.
+// charge is what rr holds in this host's ledger: nothing when it runs on
+// another machine (a Linux host or a Windows host).
 func charge(rr *runnerRec, req admission.Request) admission.Request {
-	if rr.host != "" {
+	if rr.remote {
 		return admission.Request{}
 	}
 	return req
@@ -231,13 +233,16 @@ func (s *Scheduler) vmManaged(lk LaneKey) bool {
 // memory (reserved separately) is the job's memory, so only overhead remains.
 func (s *Scheduler) fullReq(r *jobRec) admission.Request {
 	if s.vmManaged(r.lane) {
-		cpu := r.cpu
-		if s.o.RemoteVM != nil && s.o.RemoteVM(r.lane) {
-			cpu = 0
-		}
-		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: cpu}
+		return admission.Request{Mem: s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
 	}
 	return admission.Request{Mem: r.cost + s.o.RunnerOverhead, PinnedCores: r.pinned, CPU: r.cpu}
+}
+
+// remoteVM reports that a new grant on lk goes to a separate Windows machine.
+// It is decided once, at the grant: later the lane's next job may go
+// elsewhere, which says nothing about the runners already started.
+func (s *Scheduler) remoteVM(lk LaneKey) bool {
+	return s.vmManaged(lk) && s.o.RemoteVM != nil && s.o.RemoteVM(lk)
 }
 
 // vmNeed is the VM memory a new grant on lk must reserve: zero unless the lane
@@ -798,7 +803,7 @@ func (s *Scheduler) Restore(rs []RestoredRunner) {
 			}
 			s.lane(r.Lane)
 			s.seq++
-			rr := &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: r.Name, lane: r.Lane, createdAt: r.Created, host: r.Host}
+			rr := &runnerRec{tok: fmt.Sprintf("r%d", s.seq), seq: s.seq, name: r.Name, lane: r.Lane, createdAt: r.Created, host: r.Host, remote: r.Host != "" || r.Remote}
 			if rr.createdAt.IsZero() {
 				rr.createdAt = s.now()
 			}
@@ -1277,6 +1282,12 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	}
 	s.seq++
 	tok := fmt.Sprintf("r%d", s.seq)
+	if s.remoteVM(rec.lane) { // takes nothing here, like a Linux host
+		s.led.Force(tok, admission.Request{})
+		s.startRunner(rec, tok, s.seq, admission.Reservation{}, false, "", "")
+		s.runners[tok].remote = true
+		return true
+	}
 	if local && !blocked {
 		if res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec)); ok {
 			s.startRunner(rec, tok, s.seq, res, false, vmKey, "")
@@ -1354,7 +1365,7 @@ func (s *Scheduler) canStartRunner(t core.Target) (local, target bool) {
 }
 
 func (s *Scheduler) startRunner(rec *jobRec, tok string, seq int, res admission.Reservation, parked bool, vmKey, host string) {
-	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey, host: host}
+	rr := &runnerRec{tok: tok, seq: seq, lane: rec.lane, full: !parked, parked: parked, job: rec, createdAt: s.now(), vmKey: vmKey, host: host, remote: host != ""}
 	s.runners[tok] = rr
 	rec.rr, rec.phase = rr, pStarting
 	g := Grant{Key: tok, MemBytes: res.Mem, CPUSet: res.CPUSet(), Parked: parked, Job: rec.job, Devices: rec.devices, Image: rec.image, Host: host}

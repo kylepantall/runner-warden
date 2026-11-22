@@ -667,7 +667,8 @@ func (d *Daemon) restore(ctx context.Context) error {
 			d.noteEvent(job.RunID, job.Event)
 		}
 		d.mu.Unlock()
-		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil || busy[r.Name], Host: host})
+		restored = append(restored, scheduler.RestoredRunner{Name: r.Name, Lane: lane, Created: r.Created, Job: job, Started: job != nil || busy[r.Name], Host: host,
+			Remote: lane.OS == core.Windows && d.win != nil && d.win.IsRemote(h.BackendID)})
 	}
 	if len(restored) > 0 {
 		d.log.Info("adopted runners after restart", "count", len(restored))

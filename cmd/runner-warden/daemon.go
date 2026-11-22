@@ -189,7 +189,7 @@ func newLinuxHosts(cfg *config.Config, hostID, exe string, local *docker.Backend
 				Addr: h.SSHAddr(), User: h.SSHUser, Signer: signer,
 				KnownHosts: filepath.Join(cfg.StateDir, "linux", h.Name, "known_hosts"),
 			}),
-			Log: log.With("backend", "linux", "host", h.Name),
+			Log: log.With("backend", "linux"), // Host adds "host" itself
 		}))
 	}
 	return linuxhost.NewPool(local, hosts, log.With("backend", "linux")), nil
