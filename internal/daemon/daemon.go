@@ -295,6 +295,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	run("finished-runs", d.finishedRunsLoop)
 	if d.win != nil {
 		run("windows-idle", d.windowsIdleLoop)
+		run("windows-packages", d.windowsPackagesLoop)
 	}
 	for name, f := range d.loops {
 		run(name, f)
@@ -442,7 +443,7 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		spec.Env[hostpool.HostEnv] = g.Host
 	}
 	if l.OS == core.Linux {
-		if img := d.runnerImage(ctx, g); img != "" && g.Host != "" {
+		if img := d.cfg.Linux.ResolveImage(d.runnerImage(ctx, g)); img != "" && g.Host != "" {
 			spec.Image = img // the host pulls it, falling back to the default
 		} else if img != "" {
 			if ie, ok := b.(imageEnsurer); ok {
@@ -471,6 +472,14 @@ func (d *Daemon) StartRunner(ctx context.Context, l scheduler.LaneKey, g schedul
 		if err := d.win.EnsureUp(ctx, vm); err != nil {
 			d.win.Release(vm)
 			return "", fmt.Errorf("windows vm %s: %w", vm, err)
+		}
+		// The job may need them: install windows.package before it starts.
+		if d.win.NeedsPackages(vm) {
+			if got, err := d.win.EnsurePackages(ctx, vm); err != nil {
+				d.log.Warn("windows packages failed before a job", "vm", vm, "error", err.Error())
+			} else if len(got) > 0 {
+				d.log.Info("windows packages installed", "vm", vm, "packages", got)
+			}
 		}
 		spec.Env[WindowsVMEnv] = vm
 	}

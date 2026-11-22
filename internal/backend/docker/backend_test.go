@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
@@ -22,6 +23,8 @@ import (
 )
 
 type fakeAPI struct {
+	builds       []string
+	buildErr     string
 	pulls        []string
 	pullErr      error
 	missing      map[string]bool // image refs ImageInspect reports absent
@@ -107,6 +110,18 @@ func (f *fakeAPI) VolumeRemove(_ context.Context, id string, _ bool) error {
 	f.volRemove = append(f.volRemove, id)
 	return nil
 }
+func (f *fakeAPI) ImageBuild(_ context.Context, ctx io.Reader, o build.ImageBuildOptions) (build.ImageBuildResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, _ := io.ReadAll(ctx)
+	f.builds = append(f.builds, o.Tags[0]+"\n"+string(b))
+	if f.buildErr != "" {
+		return build.ImageBuildResponse{Body: io.NopCloser(strings.NewReader(`{"error":"` + f.buildErr + `"}`))}, nil
+	}
+	delete(f.missing, o.Tags[0])
+	return build.ImageBuildResponse{Body: io.NopCloser(strings.NewReader(`{"stream":"done"}`))}, nil
+}
+
 func (f *fakeAPI) ImagePull(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -450,5 +465,25 @@ func TestEnsureImageFailures(t *testing.T) {
 	api = &fakeAPI{pullErr: errors.New("registry down"), missing: map[string]bool{"job:img": true}}
 	if err := testBackend(t, api).EnsureImage(ctx, "job:img"); err == nil {
 		t.Fatal("missing image with a failed pull must error")
+	}
+}
+
+func TestEnsureImageBuildsDeclaredImages(t *testing.T) {
+	const tag = "runner-warden-build/desk:abc"
+	api := &fakeAPI{missing: map[string]bool{tag: true}}
+	b := testBackend(t, api)
+	b.cfg.Builds = map[string]string{tag: "FROM base\nRUN apt-get install -y libgtk-3-dev\n"}
+	if err := b.EnsureImage(context.Background(), tag); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.builds) != 1 || !strings.Contains(api.builds[0], "libgtk-3-dev") || len(api.pulls) != 0 {
+		t.Fatalf("builds %v pulls %v", api.builds, api.pulls)
+	}
+	if err := b.EnsureImage(context.Background(), tag); err != nil || len(api.builds) != 1 {
+		t.Fatal("a built tag is never rebuilt or pulled")
+	}
+	api.missing[tag], api.buildErr = true, "E: Unable to locate package"
+	if err := b.EnsureImage(context.Background(), tag); err == nil {
+		t.Fatal("build errors must surface")
 	}
 }

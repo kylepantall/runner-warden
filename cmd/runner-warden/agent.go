@@ -86,6 +86,7 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 		AllowedBinds: a.AllowedBinds,
 		CacheBinds:   binds,
 		CacheEnv:     env,
+		Builds:       a.Builds,
 		LogLevel:     a.LogLevel,
 		Log:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})

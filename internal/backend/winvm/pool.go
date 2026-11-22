@@ -121,6 +121,8 @@ type Pool struct {
 	up         map[string]bool
 	ready      map[string]bool // ssh answered since the container started
 	claimed    map[string]bool
+	pkgDone    map[string]string // vm -> packagesKey last ensured
+	pkgMu      sync.Mutex        // one EnsurePackages at a time
 	lastActive map[string]time.Time
 	runners    map[string]*runnerRec
 	execs      map[string]Exec
@@ -216,7 +218,7 @@ func newPool(cfg Config, api dockerAPI, exec func(config.WindowsVM) (Exec, error
 		cfg: cfg, log: log, api: api, exec: exec,
 		now: time.Now, sleep: sleepCtx,
 		vms: map[string]config.WindowsVM{}, up: map[string]bool{}, ready: map[string]bool{},
-		claimed: map[string]bool{}, lastActive: map[string]time.Time{},
+		claimed: map[string]bool{}, lastActive: map[string]time.Time{}, pkgDone: map[string]string{},
 		runners: map[string]*runnerRec{}, execs: map[string]Exec{}, logBytes: map[string]int64{}, vmLocks: map[string]*sync.Mutex{},
 		version: cfg.Windows.RunnerVersion,
 	}

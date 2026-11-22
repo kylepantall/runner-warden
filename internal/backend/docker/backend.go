@@ -15,6 +15,7 @@ import (
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -66,6 +67,10 @@ type Config struct {
 	// create as persistent containers (see dockerproxy.Config).
 	PersistentNames []string
 
+	// Builds maps image tags this backend builds itself to their Dockerfile
+	// (config.Linux.BuiltImages). EnsureImage builds a missing one.
+	Builds map[string]string
+
 	// LogLevel is the slog level the out-of-process proxies log at ("" = info).
 	LogLevel string
 
@@ -88,6 +93,7 @@ type dockerAPI interface {
 	VolumeList(ctx context.Context, opts volume.ListOptions) (volume.ListResponse, error)
 	VolumeRemove(ctx context.Context, id string, force bool) error
 	ImagePull(ctx context.Context, ref string, opts image.PullOptions) (io.ReadCloser, error)
+	ImageBuild(ctx context.Context, buildContext io.Reader, opts build.ImageBuildOptions) (build.ImageBuildResponse, error)
 	ImageInspect(ctx context.Context, id string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
 }
 
@@ -217,6 +223,12 @@ func (b *Backend) EnsureImage(ctx context.Context, ref string) error {
 		return nil
 	}
 	_, ierr := b.api.ImageInspect(ctx, ref)
+	if df, ok := b.cfg.Builds[ref]; ok {
+		if ierr == nil {
+			return nil // the tag names its contents: never stale
+		}
+		return b.build(ctx, ref, df)
+	}
 	if t, ok := b.pulled.Load(ref); ok && ierr == nil && time.Since(t.(time.Time)) < jobImageRefresh {
 		return nil
 	}

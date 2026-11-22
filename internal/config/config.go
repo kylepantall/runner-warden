@@ -2,12 +2,16 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -128,10 +132,60 @@ type Linux struct {
 	// SSHKeyFile is the key used to reach [[linux.host]] machines; default
 	// windows.ssh_key_file.
 	SSHKeyFile string `toml:"ssh_key_file"`
+	// Builds are runner images runner-warden builds itself: the runner image
+	// plus apt packages. A [[cost]] image naming one gets it, on this host
+	// and on every [[linux.host]].
+	Builds []LinuxBuild `toml:"build"`
 	// Hosts are separate Linux machines (or WSL distros) running Docker and
 	// the runner-warden binary. Jobs overflow to them when this host's budget
 	// is full; they use none of this host's memory or CPU.
 	Hosts []LinuxHost `toml:"host"`
+}
+
+// LinuxBuild is a runner image built FROM linux.image with extra packages.
+type LinuxBuild struct {
+	Name     string   `toml:"name"`
+	Packages []string `toml:"packages"` // apt package names, optionally name=version
+}
+
+// BuiltImages maps every build's image tag to its Dockerfile.
+func (l Linux) BuiltImages() map[string]string {
+	out := map[string]string{}
+	for _, b := range l.Builds {
+		tag, df := l.build(b)
+		out[tag] = df
+	}
+	return out
+}
+
+// ResolveImage turns a build name into its image tag; other refs pass.
+func (l Linux) ResolveImage(ref string) string {
+	for _, b := range l.Builds {
+		if b.Name == ref {
+			tag, _ := l.build(b)
+			return tag
+		}
+	}
+	return ref
+}
+
+// build renders a build's Dockerfile and its tag, which changes with the
+// base image or the packages, so an edit means a fresh build.
+func (l Linux) build(b LinuxBuild) (tag, dockerfile string) {
+	pkgs := slices.Clone(b.Packages)
+	slices.Sort(pkgs)
+	dockerfile = "FROM " + l.Image + "\nUSER root\n" +
+		"RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +
+		strings.Join(pkgs, " ") + " && rm -rf /var/lib/apt/lists/*\n"
+	sum := sha256.Sum256([]byte(dockerfile))
+	return "runner-warden-build/" + b.Name + ":" + hex.EncodeToString(sum[:6]), dockerfile
+}
+
+// WindowsPackage is software runner-warden keeps installed on every Windows
+// VM and host, through winget.
+type WindowsPackage struct {
+	ID       string `toml:"id"`       // winget package id
+	Override string `toml:"override"` // installer arguments (winget --override), e.g. VS workloads
 }
 
 // LinuxHost is a Linux machine runner-warden drives over SSH: each operation
@@ -180,6 +234,8 @@ type Windows struct {
 	// on, use none of this host's memory or CPU and no licence of
 	// max_concurrent; each runs one job at a time.
 	Hosts []WindowsHost `toml:"host"`
+	// Packages are installed (when missing) on every VM and host.
+	Packages []WindowsPackage `toml:"package"`
 }
 
 // WindowsHost is a Windows machine runner-warden drives over SSH.
@@ -639,6 +695,30 @@ func (c *Config) Validate() error {
 		}
 		if !strings.HasPrefix(h.Binary, "/") || strings.ContainsAny(h.Binary, " '\"$`\\") {
 			add("linux.host %q: binary must be an absolute path without spaces or quotes", h.Name)
+		}
+	}
+	aptRe := regexp.MustCompile(`^[a-z0-9][a-z0-9+.\-]*(=[A-Za-z0-9.+:~\-]+)?$`)
+	builds := map[string]bool{}
+	for i, b := range c.Linux.Builds {
+		if naming.ValidatePrefix(b.Name) != nil || builds[b.Name] {
+			add("linux.build[%d]: name must be unique lowercase letters, digits and hyphens", i)
+		}
+		builds[b.Name] = true
+		if len(b.Packages) == 0 {
+			add("linux.build %q: list its packages", b.Name)
+		}
+		for _, p := range b.Packages {
+			if !aptRe.MatchString(p) {
+				add("linux.build %q: %q is not an apt package name", b.Name, p)
+			}
+		}
+	}
+	for i, p := range c.Windows.Packages {
+		if !shellSafe(p.ID) {
+			add("windows.package[%d]: id must be a winget package id", i)
+		}
+		if strings.ContainsAny(p.Override, "'`\n") {
+			add("windows.package %q: override must not contain quotes or newlines", p.ID)
 		}
 	}
 	for i, h := range c.MacOS.Hosts {

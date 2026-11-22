@@ -27,17 +27,18 @@ const (
 // runs with. Paths that are the host's own (state, sockets, binary) are not
 // sent: the agent derives them from Instance.
 type AgentConfig struct {
-	Instance        string         `json:"instance"`
-	Prefix          string         `json:"prefix"`
-	HostID          string         `json:"host_id"`
-	Image           string         `json:"image"`
-	RunnerUID       int            `json:"runner_uid,omitempty"`
-	TmpfsSize       int64          `json:"tmpfs_size,omitempty"`
-	OOMScoreAdj     int            `json:"oom_score_adj,omitempty"`
-	AllowedBinds    []string       `json:"allowed_binds,omitempty"`
-	PersistentNames []string       `json:"persistent_names,omitempty"`
-	Caches          []config.Cache `json:"caches,omitempty"`
-	LogLevel        string         `json:"log_level,omitempty"`
+	Instance        string            `json:"instance"`
+	Prefix          string            `json:"prefix"`
+	HostID          string            `json:"host_id"`
+	Image           string            `json:"image"`
+	RunnerUID       int               `json:"runner_uid,omitempty"`
+	TmpfsSize       int64             `json:"tmpfs_size,omitempty"`
+	OOMScoreAdj     int               `json:"oom_score_adj,omitempty"`
+	AllowedBinds    []string          `json:"allowed_binds,omitempty"`
+	PersistentNames []string          `json:"persistent_names,omitempty"`
+	Caches          []config.Cache    `json:"caches,omitempty"`
+	Builds          map[string]string `json:"builds,omitempty"` // image tag -> Dockerfile, built on demand
+	LogLevel        string            `json:"log_level,omitempty"`
 }
 
 // Request is one agent call, sent as JSON on stdin.
