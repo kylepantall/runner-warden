@@ -92,7 +92,7 @@ func TestStartRunsLaunchdJobWithJITOnStdin(t *testing.T) {
 		t.Fatalf("%+v %v", hd, err)
 	}
 	last := f.calls[len(f.calls)-1]
-	for _, want := range []string{"launchctl bootstrap gui/501", "<string>rw.main." + runner + "</string>", "'SkVU'", `\$(cat .jit)`, "cp -Rc"} {
+	for _, want := range []string{"launchctl bootstrap gui/501", "<key>RUNNER_TOOL_CACHE</key><string>$TOOLS</string>", `TOOLS="$HOME/rw/main/_tool"`, "<string>rw.main." + runner + "</string>", "'SkVU'", `\$(cat .jit)`, "cp -Rc"} {
 		if !strings.Contains(last.stdin, want) {
 			t.Errorf("start script lacks %q", want)
 		}
