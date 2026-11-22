@@ -63,6 +63,16 @@ func (p *Pool) EnsureRunnerFiles(ctx context.Context, vm string) error {
 	return err
 }
 
+// ensureRunnerDir makes one slot's runner install match the wanted version.
+func (p *Pool) ensureRunnerDir(ctx context.Context, v config.WindowsVM, dir string) error {
+	ver, err := p.runnerVersion(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = p.runScript(ctx, v, ensureRunnerScript(dir, ver), "", startTimeout)
+	return err
+}
+
 // Start launches an ephemeral JIT runner in a VM. spec.Env[EnvVM] names the
 // VM (from Pick); without it Start picks one for spec.ScaleSet.Target.
 // MemBytes, CPUSet, Mounts, Image, Devices and other Env are ignored: the VM's
@@ -88,14 +98,16 @@ func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 	}
 	rec := &runnerRec{Name: spec.Name, VM: vm, StartedAt: p.now()}
 	p.mu.Lock()
-	for _, r := range p.runners {
-		if r.VM == vm && r.Name != spec.Name {
-			p.mu.Unlock()
-			return core.Handle{}, ErrBusy
-		}
+	slot, ok := p.freeSlotLocked(vm)
+	if !ok {
+		p.mu.Unlock()
+		return core.Handle{}, ErrBusy
 	}
+	rec.Slot = slot
 	p.runners[spec.Name] = rec
-	delete(p.claimed, vm)
+	if p.claims[vm] > 0 {
+		p.claims[vm]--
+	}
 	err = p.saveStateLocked(vm)
 	p.mu.Unlock()
 	if err != nil {
@@ -111,7 +123,7 @@ func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 	if err := p.EnsureUp(ctx, vm); err != nil {
 		return fail(err)
 	}
-	if err := p.EnsureRunnerFiles(ctx, vm); err != nil {
+	if err := p.ensureRunnerDir(ctx, v, slotDir(p.cfg.Windows.RunnerDir, slot)); err != nil {
 		return fail(err)
 	}
 	if s, ok := p.sampleVM(ctx, v); ok {
@@ -120,7 +132,7 @@ func (p *Pool) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 		_ = p.saveStateLocked(vm)
 		p.mu.Unlock()
 	}
-	if _, err := p.runScript(ctx, v, startJobScript(p.paths(spec.Name), p.taskLogon(v)), spec.JITConfig, startTimeout); err != nil {
+	if _, err := p.runScript(ctx, v, startJobScript(p.paths(spec.Name), p.taskLogon(v), v.JobSlots() > 1), spec.JITConfig, startTimeout); err != nil {
 		return fail(err)
 	}
 	return core.Handle{RunnerName: spec.Name, BackendID: vm, StartedAt: rec.StartedAt}, nil
@@ -291,7 +303,7 @@ func (p *Pool) Cleanup(ctx context.Context, runnerName string) error {
 		return nil
 	}
 	if p.Up(rec.VM) && !rec.Restarted {
-		out, err := p.runScript(ctx, p.vms[rec.VM], cleanupScript(p.paths(runnerName)), "", cleanupTimeout)
+		out, err := p.runScript(ctx, p.vms[rec.VM], cleanupScript(p.paths(runnerName), !p.vms[rec.VM].IsRemote()), "", cleanupTimeout)
 		if err != nil {
 			return err
 		}

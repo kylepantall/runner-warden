@@ -389,14 +389,14 @@ func (p *Pool) StopIdle(ctx context.Context, now time.Time) []string {
 		p.mu.Lock()
 		idle := p.up[name] && !p.busyLocked(name) && now.Sub(p.lastActive[name]) >= ttl
 		if idle {
-			p.claimed[name] = true // keep Pick away while stopping
+			p.stopping[name] = true // keep Pick away while stopping
 		}
 		p.mu.Unlock()
 		if !idle {
 			continue
 		}
 		err := p.stopVM(ctx, p.vms[name])
-		p.Release(name)
+		p.endStop(name)
 		if err != nil {
 			p.log.Warn("idle vm stop failed", "vm", name, "error", err.Error())
 			continue
@@ -420,8 +420,16 @@ func (p *Pool) StopNow(ctx context.Context, vm string) error {
 		p.mu.Unlock()
 		return ErrBusy
 	}
-	p.claimed[vm] = true
+	p.stopping[vm] = true
 	p.mu.Unlock()
-	defer p.Release(vm)
+	defer p.endStop(vm)
 	return p.stopVM(ctx, v)
+}
+
+// endStop lets Pick at vm again after a stop.
+func (p *Pool) endStop(vm string) {
+	p.mu.Lock()
+	delete(p.stopping, vm)
+	p.lastActive[vm] = p.now()
+	p.mu.Unlock()
 }

@@ -18,6 +18,7 @@ type runnerRec struct {
 	CPUBase   float64   `json:"cpu_base,omitempty"` // container counters at job start
 	IOBase    int64     `json:"io_base,omitempty"`
 	Restarted bool      `json:"restarted,omitempty"` // VM was restarted under it
+	Slot      int       `json:"slot,omitempty"`      // runner install on a multi-job host; 0/1 = windows.runner_dir
 }
 
 type stateFile struct {

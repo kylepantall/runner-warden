@@ -187,3 +187,48 @@ func TestEnsurePackages(t *testing.T) {
 		t.Fatal("ensured packages are not re-run")
 	}
 }
+
+func TestHostRunsSeveralJobs(t *testing.T) {
+	f := newHostFixture(t)
+	f.pool.vms["pc"] = func() config.WindowsVM { v := f.pool.vms["pc"]; v.Slots = 2; return v }()
+	f.setUp("pc", time.Now())
+	tgt := core.Target{Owner: "o"}
+	ctx := context.Background()
+	for i, name := range []string{"rw-h1-pc", "rw-h1-pc2"} {
+		vm, ok := f.pool.PickNamed("pc", tgt)
+		if !ok {
+			t.Fatalf("slot %d not free", i+1)
+		}
+		s := spec(name, vm)
+		if _, err := f.pool.Start(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := f.pool.PickNamed("pc", tgt); ok {
+		t.Fatal("both slots are taken")
+	}
+	starts := 0
+	for _, c := range f.ex.calls {
+		if strings.Contains(c.script, "Register-ScheduledTask") {
+			starts++
+			if strings.Contains(c.script, "Get-ScheduledTask -TaskName 'rw-*'") {
+				t.Fatal("a shared host must not sweep the other job")
+			}
+			if starts == 2 && !strings.Contains(c.script, `C:\actions-runner-s2`) {
+				t.Fatal("second job gets its own runner install")
+			}
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("starts %d", starts)
+	}
+	if err := f.pool.Cleanup(ctx, "rw-h1-pc"); err != nil {
+		t.Fatal(err)
+	}
+	if js, _ := f.ex.find("Unregister-ScheduledTask -TaskName $tn"); strings.Contains(js.script, "$env:TEMP") {
+		t.Fatal("never wipe the user's TEMP on a host")
+	}
+	if _, ok := f.pool.PickNamed("pc", tgt); !ok {
+		t.Fatal("a freed slot takes the next job")
+	}
+}
