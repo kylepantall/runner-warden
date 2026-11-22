@@ -32,8 +32,8 @@ func hostCmd() *cobra.Command {
 
 type hostAddFlags struct {
 	kind, address, user, name, targets, distro, vm, tart string
-	jobs                                               int
-	yes, noRestart                                     bool
+	jobs                                                 int
+	yes, noRestart                                       bool
 }
 
 func hostAddCmd() *cobra.Command {
