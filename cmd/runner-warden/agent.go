@@ -61,9 +61,14 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 			return fail(fmt.Errorf("job slice: %w", err))
 		}
 	}
-	binds, env, err := prepareCaches(a.Caches)
-	if err != nil {
-		return fail(err)
+	var binds []string
+	var env map[string]string
+	if req.Op == linuxhost.OpPrepare || req.Op == linuxhost.OpStart {
+		// Only starts mount caches; preparing them on every call would
+		// reset what an operator changed.
+		if binds, env, err = prepareCaches(a.Caches); err != nil {
+			return fail(err)
+		}
 	}
 	b, err := docker.New(docker.Config{
 		Instance:     a.Instance,

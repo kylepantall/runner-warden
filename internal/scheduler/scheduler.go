@@ -425,6 +425,9 @@ func (s *Scheduler) updateJob(r *jobRec, j core.Job) {
 		return
 	}
 	s.log.info("job cost updated", "job", r.id, "from", old, "to", r.cost, "cpu_from", oldCPU, "cpu_to", r.cpu)
+	if rr := r.rr; rr != nil && rr.host != "" && r.local {
+		s.log.warn("local-only job is on a remote host", "job", r.id, "runner", rr.name, "host", rr.host)
+	}
 	if rr := r.rr; rr != nil && rr.full && rr.job == r {
 		_, _ = s.led.ForceResize(rr.tok, charge(rr, s.reqFor(rr, r)))
 	}
@@ -1255,7 +1258,9 @@ func (s *Scheduler) liveCounts(t core.Target) (all, target int) {
 
 func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	rec := c.rec
-	if oldest != nil && s.policy().Blocks(*oldest, c.w, s.now()) {
+	// The oldest waiter blocks only what competes with it for this host.
+	blocked := oldest != nil && s.policy().Blocks(*oldest, c.w, s.now())
+	if c.parked && blocked {
 		return false
 	}
 	if c.parked {
@@ -1272,16 +1277,16 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 	}
 	s.seq++
 	tok := fmt.Sprintf("r%d", s.seq)
-	if local {
+	if local && !blocked {
 		if res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec)); ok {
 			s.startRunner(rec, tok, s.seq, res, false, vmKey, "")
 			return true
 		}
 	}
-	if rec.local {
-		return false
+	host := ""
+	if !rec.local {
+		host = s.freeHost(rec.lane)
 	}
-	host := s.freeHost(rec.lane)
 	if host == "" {
 		return false
 	}

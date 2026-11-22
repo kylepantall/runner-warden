@@ -832,3 +832,22 @@ func TestRestoredHostRunnerReservesNothing(t *testing.T) {
 		}
 	})
 }
+
+func TestHeldOldJobDoesNotBlockOverflow(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.DefaultJobMem = 4 * gib
+		o.Costs = []admission.Rule{{Match: "a/r/ci.yml/big", Mem: 9 * gib, Local: true}}
+		o.ReserveAfter = time.Minute
+		o.LinuxHosts = []RemoteHost{{Name: "pc", Slots: 2}}
+	})
+	h.assign(lane("a", 1), h.job("a", "small")) // 4GiB here, 6GiB free
+	big := h.assign(lane("a", 2), h.job("a", "big"))
+	h.tick(2 * time.Minute) // big is now past ReserveAfter
+	j := h.assign(lane("a", 3), h.job("a", "next"))
+	if g, ok := h.startsFor(j.JobID); !ok || g.Host != "pc" {
+		t.Fatalf("overflow must not wait behind a held local job: %+v %v", g, ok)
+	}
+	if _, ok := h.startsFor(big.JobID); ok {
+		t.Fatal("big job cannot fit yet")
+	}
+}

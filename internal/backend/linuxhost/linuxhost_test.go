@@ -206,3 +206,15 @@ func TestHostOf(t *testing.T) {
 		t.Fatal(h, id)
 	}
 }
+
+func TestPrepareProbesHostsBeforeReturning(t *testing.T) {
+	local, remote := &fakeBackend{}, &fakeBackend{list: []core.Handle{{RunnerName: "there", BackendID: "c2"}}}
+	h := newTestHost(t, &fakeSSH{be: remote, version: "v9"})
+	p := NewPool(local, []*Host{h}, nil)
+	if err := p.Prepare(context.Background()); err != nil || !h.Up() {
+		t.Fatalf("restore follows Prepare and must see the host: %v up=%v", err, h.Up())
+	}
+	if hs, _ := p.List(context.Background()); len(hs) != 1 || hs[0].BackendID != "pc/c2" {
+		t.Fatalf("%+v", hs)
+	}
+}

@@ -2,7 +2,6 @@ package linuxhost
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -23,8 +22,6 @@ type Local interface {
 // listGrace is how long a host's last runner list stands in for one it
 // cannot give: a short outage must not make its runners look gone.
 const listGrace = 15 * time.Minute
-
-var errHostDown = errors.New("host down")
 
 // ProbeEvery is how often Loop re-probes the hosts.
 const ProbeEvery = time.Minute
@@ -82,16 +79,30 @@ func (p *Pool) Hosts() []string { return append([]string(nil), p.order...) }
 // Caps implements core.Backend.
 func (p *Pool) Caps() core.Caps { return p.local.Caps() }
 
-// Prepare prepares this machine, then probes the hosts in the background: an
-// unreachable host must not hold up the daemon.
+// PrepareTimeout bounds the hosts' first probe at daemon start.
+const PrepareTimeout = 3 * time.Minute
+
+// Prepare prepares this machine and probes the hosts, in parallel and for at
+// most PrepareTimeout: runners on a host are adopted only if it answers, and
+// an unreachable host must not hold up the daemon for long.
 func (p *Pool) Prepare(ctx context.Context) error {
 	if err := p.local.Prepare(ctx); err != nil {
 		return err
 	}
-	for _, h := range p.hosts {
-		go func() { _ = h.Probe(ctx) }()
-	}
+	p.probeAll(ctx, PrepareTimeout)
 	return nil
+}
+
+func (p *Pool) probeAll(ctx context.Context, limit time.Duration) {
+	var wg sync.WaitGroup
+	for _, h := range p.hosts {
+		wg.Go(func() {
+			pctx, cancel := context.WithTimeout(ctx, limit)
+			defer cancel()
+			_ = h.Probe(pctx)
+		})
+	}
+	wg.Wait()
 }
 
 // Loop re-probes every host until ctx ends.
@@ -104,15 +115,7 @@ func (p *Pool) Loop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		var wg sync.WaitGroup
-		for _, h := range p.hosts {
-			wg.Go(func() {
-				pctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-				defer cancel()
-				_ = h.Probe(pctx)
-			})
-		}
-		wg.Wait()
+		p.probeAll(ctx, 10*time.Minute)
 	}
 }
 
@@ -214,13 +217,16 @@ func (p *Pool) List(ctx context.Context) ([]core.Handle, error) {
 	}
 	for _, name := range p.order {
 		h := p.hosts[name]
-		var hs []core.Handle
-		lerr := errHostDown
-		if h.Up() {
-			hs, lerr = h.List(ctx)
-		}
+		// Asked even when down: a host that failed its probe may still
+		// answer for the runners it has.
+		hs, lerr := h.List(ctx)
 		p.mu.Lock()
 		if lerr == nil {
+			for r, at := range p.where {
+				if at == name {
+					delete(p.where, r)
+				}
+			}
 			for i := range hs {
 				hs[i].BackendID = onHost(name, hs[i].BackendID)
 				p.where[hs[i].RunnerName] = name
