@@ -1,6 +1,6 @@
 # runner-warden
 
-Autoscaling manager for **self-hosted GitHub Actions runners on your own machines**. One daemon per host serves the orgs and repos you add with fresh, one-job runners, sized by real memory use.
+Autoscaling manager for **self-hosted GitHub Actions runners on your own machines**. One daemon serves the orgs and repos you add with fresh, one-job runners, sized by real memory and CPU use, on its host and on other machines it drives over SSH.
 
 > ⚠️ Runners use the host Docker daemon, which is root-equivalent. Only serve repos whose workflows you trust. See [SECURITY.md](SECURITY.md).
 
@@ -8,16 +8,18 @@ Autoscaling manager for **self-hosted GitHub Actions runners on your own machine
 
 | Feature | How |
 |---|---|
-| One label per OS | Workflows use `runs-on: <prefix>-linux` or `<prefix>-windows` |
+| One label per OS | Workflows use `runs-on: <prefix>-linux`, `<prefix>-windows` or `<prefix>-macos` |
 | Fresh runner per job | Ephemeral JIT runners; nothing persists between jobs except shared caches |
-| Memory-aware autoscaling | One memory budget per host (a systemd slice hard cap, never throttled). A job that doesn't fit waits in GitHub's queue, where its timeout isn't ticking, while smaller jobs keep flowing |
+| Memory- and CPU-aware autoscaling | One memory budget (a systemd slice hard cap, never throttled) and one CPU budget per host. A job that doesn't fit waits in GitHub's queue, where its timeout isn't ticking, while smaller jobs keep flowing |
 | Busy repo uses the whole box | Work-conserving; fair sharing only when repos compete |
 | `container:` / `services:` / `docker build` | Sibling containers through a per-runner Docker proxy that labels, places and cleans up everything a job creates |
 | Hung jobs | Cancelled after no CPU/IO/output for `hang.idle`, or after `hang.max_duration` |
 | Stale PR jobs | Cancelled when the PR is merged/closed or the pushed branch is deleted |
 | Runner lost mid-job | Run cancelled immediately and the job re-run once |
 | Shared caches | Host dirs (npm, Go, pub, Gradle…) mounted into runners and job containers with a fixed uid |
-| Windows | `dockurr/windows` VMs on the same host, started on demand, one job at a time per VM |
+| Windows | `dockurr/windows` VMs on the same host, started on demand, and separate Windows machines over SSH; one job at a time each |
+| Overflow Linux hosts | Other Linux machines or WSL distros take the Linux jobs this host can't fit; the daemon installs and updates itself there |
+| macOS | A persistent tart VM on a Mac, driven over SSH; a fresh runner per job in the guest's GUI session (login keychain works) |
 | One-command install | `runner-warden setup` scans existing runners and workflows, installs the service, rewrites `runs-on`, retires old runners |
 
 ## Quick start
@@ -49,6 +51,7 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 | `migrate apply\|retire\|rollback` | Label sweep and retirement of old runners |
 | `migrate check [--save]` | Re-scan for jobs still on old labels (e.g. branches older than the sweep); exit 3 if any, so it can run from cron or CI |
 | `windows provision\|adopt <vm>` | Create a Windows VM, or take over an existing dockurr disk |
+| `windows host-script\|host-setup <host>` | Prepare a separate Windows machine as a host |
 | `config validate` | Validate the config |
 | `update [--check]` | Update to the latest release (checksum + signature verified), then restart instances; running jobs survive |
 | `uninstall [--purge]` | Stop the service, delete its scale sets, containers, VM containers and slice; `--purge` also removes config, token and state |
@@ -59,10 +62,10 @@ Needs: Linux with systemd and cgroup v2, Docker 25+, `gh` logged in as a user wi
 
 ## How scheduling works
 
-Each repo/org and OS gets several "lane" scale sets sharing one label. Each lane holds at most one job that hasn't started yet, so the manager always knows which job the next runner will get. A job that fits the memory budget gets a runner immediately; one that doesn't stays queued on GitHub without blocking the other lanes. Details: [PLAN.md](PLAN.md) and [spike/M0-FINDINGS.md](spike/M0-FINDINGS.md).
+Each repo/org and OS gets several "lane" scale sets sharing one label. Each lane holds at most one job that hasn't started yet, so the manager always knows which job the next runner will get. A job that fits the budget gets a runner immediately; one that doesn't goes to a free remote host if one serves it, or stays queued on GitHub without blocking the other lanes. Remote hosts reserve nothing on this host. Details: [PLAN.md](PLAN.md) and [spike/M0-FINDINGS.md](spike/M0-FINDINGS.md).
 
 ## Status
 
-Pre-1.0. Linux and Windows backends; macOS is planned.
+Pre-1.0. Linux (local and remote hosts), Windows (local VMs and remote hosts) and macOS (tart on remote Macs).
 
 Licensed under [Apache-2.0](LICENSE).
