@@ -758,6 +758,12 @@ func TestRemoteWindowsJobTakesNoCPU(t *testing.T) {
 	if got := h.s.Snapshot().Ledger.CPUReserved; got != 2000 {
 		t.Fatalf("local VM job should reserve its CPU, got %d", got)
 	}
+	// The remote job starting later must not be charged here because the
+	// lane's next job would now go to a local VM.
+	h.begin(win, j)
+	if got := h.s.Snapshot().Ledger.CPUReserved; got != 2000 {
+		t.Fatalf("remote job charged after it started: %d", got)
+	}
 }
 
 func TestLinuxJobsOverflowToHost(t *testing.T) {
