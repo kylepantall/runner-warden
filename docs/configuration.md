@@ -135,7 +135,7 @@ A `[[macos.host]]` runs macOS jobs in a tart VM on another Mac, one at a time. W
 | Aspect | Behaviour |
 |---|---|
 | Needs | Remote Login on the Mac with runner-warden's public key, tart, and a VM that stays running (e.g. a launchd agent running `tart run <vm> --no-graphics` with `KeepAlive`). The VM needs the tart guest agent (all Cirrus Labs images have it) |
-| Per job | A fresh JIT runner, cloned from a template install in the guest (`~/rw/<instance>/template`, kept at `runner_version`), started as a launchd job in the guest user's GUI session so the login keychain works. Its dir and work dir are removed afterwards; caches elsewhere in the guest stay |
+| Per job | A fresh JIT runner, cloned from a template install in the guest (`~/rw/<instance>/template`, kept at `runner_version`), started as a launchd job in the guest user's GUI session so the login keychain works. Its dir and work dir are removed afterwards; the tool cache (`RUNNER_TOOL_CACHE`, `~/rw/<instance>/_tool`) and caches elsewhere in the guest stay |
 | Clock | The guest clock is synced when it drifts over 30s (a sleeping Mac leaves it behind, and the runner's token then looks expired) |
 | Budget | Uses none of this host's memory or CPU. Waiting macOS jobs never hold back jobs here |
 | Outages | Probed every minute; a sleeping or unreachable Mac takes no jobs. runner-warden does not start the VM |

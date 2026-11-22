@@ -89,6 +89,10 @@ func (h *Host) template() string { return base + h.cfg.Instance + `/template"` }
 func (h *Host) dir(runner string) string {
 	return base + h.cfg.Instance + `/runners/` + runner + `"`
 }
+// tools is the tool cache shared by every job (setup-* actions, kept SDKs):
+// the runner dir, and its default _work/_tool, go after each job.
+func (h *Host) tools() string { return base + h.cfg.Instance + `/_tool"` }
+
 func (h *Host) label(runner string) string { return "rw." + h.cfg.Instance + "." + runner }
 func (h *Host) domain() string             { return "gui/" + strconv.Itoa(h.cfg.GuestUID) }
 
@@ -233,7 +237,8 @@ func (h *Host) Start(ctx context.Context, spec core.RunnerSpec) (core.Handle, er
 	esc := strings.ReplaceAll(runCmd, "$", `\$`) // the heredoc expands only $D
 	script := `set -e
 D=` + h.dir(spec.Name) + `
-mkdir -p "$(dirname "$D")" && rm -rf "$D"
+TOOLS=` + h.tools() + `
+mkdir -p "$(dirname "$D")" "$TOOLS" && rm -rf "$D"
 cp -Rc ` + h.template() + ` "$D" 2>/dev/null || cp -R ` + h.template() + ` "$D"
 umask 077
 printf '%s' '` + spec.JITConfig + `' > "$D/.jit"
@@ -243,6 +248,10 @@ cat > "$D/job.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>Label</key><string>` + h.label(spec.Name) + `</string>
 <key>RunAtLoad</key><true/>
+<key>EnvironmentVariables</key><dict>
+<key>RUNNER_TOOL_CACHE</key><string>$TOOLS</string>
+<key>AGENT_TOOLSDIRECTORY</key><string>$TOOLS</string>
+</dict>
 <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>` + esc + `</string><string>$D</string></array>
 <key>StandardOutPath</key><string>$D/runner.log</string>
 <key>StandardErrorPath</key><string>$D/runner.log</string>
