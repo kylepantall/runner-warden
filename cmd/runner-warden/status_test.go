@@ -75,6 +75,8 @@ func TestRenderStatusShowsMachines(t *testing.T) {
 		WindowsHosts:   map[string]bool{"pc": true},
 		LinuxHosts:     map[string]bool{"pc-wsl": true},
 		LinuxHostNames: []string{"pc-wsl"},
+		MacHosts:       map[string]bool{"mac": false},
+		MacHostNames:   []string{"mac"},
 		Runners: []daemon.RunnerStatus{
 			{Name: "r-lin", OS: "linux", RunID: 1, Alive: true},
 			{Name: "r-win", OS: "windows", VM: "pc", RunID: 2, Alive: true},
@@ -88,7 +90,7 @@ func TestRenderStatusShowsMachines(t *testing.T) {
 	var b bytes.Buffer
 	renderStatus(&b, rep)
 	out := b.String()
-	for _, want := range []string{"MACHINE", "box", "build", "spare", "pc", "linux host"} {
+	for _, want := range []string{"MACHINE", "box", "build", "spare", "pc", "linux host", "macos host", "UNREACHABLE"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}

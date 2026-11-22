@@ -167,3 +167,29 @@ func TestLinuxHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestMacHosts(t *testing.T) {
+	base := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[target]]\norg=\"o\"\nos=[\"linux\",\"macos\"]\n[macos]\nenabled=true\n"
+	c, err := Load(write(t, base+"[[macos.host]]\nname=\"mac\"\naddress=\"mac.tail\"\nssh_user=\"me\"\nvm=\"runner-xcode\"\ntargets=[\"o\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := c.MacOS.Hosts[0]
+	if h.SSHAddr() != "mac.tail:22" || h.Tart != "/opt/homebrew/bin/tart" || h.GuestUID != 501 || !h.Serves(core.Target{Owner: "o"}) {
+		t.Fatalf("defaults %+v", h)
+	}
+	for name, s := range map[string]string{
+		"no hosts": "",
+		"bad vm":   "[[macos.host]]\nname=\"mac\"\naddress=\"m\"\nssh_user=\"me\"\nvm=\"a b\"\ntargets=[\"o\"]\n",
+		"no user":  "[[macos.host]]\nname=\"mac\"\naddress=\"m\"\nvm=\"v\"\ntargets=[\"o\"]\n",
+		"no tgts":  "[[macos.host]]\nname=\"mac\"\naddress=\"m\"\nssh_user=\"me\"\nvm=\"v\"\n",
+	} {
+		if _, err := Load(write(t, base+s)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+	off := `prefix="my-ci"` + "\n[limits]\nmemory_budget=\"1GiB\"\n[linux]\nenabled=true\n[[target]]\norg=\"o\"\nos=[\"macos\"]\n"
+	if _, err := Load(write(t, off)); err == nil {
+		t.Error("macos target without [macos] must fail")
+	}
+}

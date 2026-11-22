@@ -85,6 +85,16 @@ exec = "wsl -d Ubuntu -u root --"  # runs commands as root there; default "sudo 
 max_concurrent = 2               # jobs at once
 targets = ["my-org"]
 
+[macos]                          # macOS jobs, in tart VMs on separate Macs
+enabled = true
+
+[[macos.host]]
+name = "mac"
+address = "mac.example.ts.net"
+ssh_user = "me"                  # owns the tart VM; key: macos.ssh_key_file (default windows.ssh_key_file)
+vm = "runner-xcode"              # a running tart VM with the guest agent
+targets = ["my-org"]             # add "macos" to the target's os list too
+
 [[windows.host]]                 # a separate Windows machine, driven over SSH
 name = "pc"
 address = "pc.example.ts.net"    # host or host:port (default 22)
@@ -117,6 +127,18 @@ A `[[linux.host]]` takes Linux jobs this host cannot fit. It runs the same Docke
 | Per job | Ephemeral JIT runner with its Docker proxy, caches (`[[cache]]` paths, created there) and per-job image (falls back to the default when the host cannot pull it). No job hooks, no persistent containers |
 | Outages | Probed every minute. A host that stops answering takes no new jobs; its runners stay tracked for 15 minutes, then count as gone |
 | WSL | Behind Windows OpenSSH use `exec = "wsl -d <distro> -u root --"`. Install Docker Engine inside the distro (`apt install docker.io`, systemd on in `/etc/wsl.conf`), not Docker Desktop. WSL stops a distro with no session attached: keep one, e.g. a startup task running `wsl.exe -d <distro> -u root -- sleep infinity` |
+
+## macOS hosts
+
+A `[[macos.host]]` runs macOS jobs in a tart VM on another Mac, one at a time. Workflows use `runs-on: <prefix>-macos`.
+
+| Aspect | Behaviour |
+|---|---|
+| Needs | Remote Login on the Mac with runner-warden's public key, tart, and a VM that stays running (e.g. a launchd agent running `tart run <vm> --no-graphics` with `KeepAlive`). The VM needs the tart guest agent (all Cirrus Labs images have it) |
+| Per job | A fresh JIT runner, cloned from a template install in the guest (`~/rw/<instance>/template`, kept at `runner_version`), started as a launchd job in the guest user's GUI session so the login keychain works. Its dir and work dir are removed afterwards; caches elsewhere in the guest stay |
+| Clock | The guest clock is synced when it drifts over 30s (a sleeping Mac leaves it behind, and the runner's token then looks expired) |
+| Budget | Uses none of this host's memory or CPU. Waiting macOS jobs never hold back jobs here |
+| Outages | Probed every minute; a sleeping or unreachable Mac takes no jobs. runner-warden does not start the VM |
 
 ## Sizing jobs
 

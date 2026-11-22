@@ -70,6 +70,7 @@ type Config struct {
 	Limits  Limits   `toml:"limits"`
 	Linux   Linux    `toml:"linux"`
 	Windows Windows  `toml:"windows"`
+	MacOS   MacOS    `toml:"macos"`
 	Hang    Hang     `toml:"hang"`
 	Stale   Stale    `toml:"stale"`
 	ImageGC ImageGC  `toml:"image_gc"`
@@ -244,6 +245,38 @@ func (v WindowsVM) Serves(t core.Target) bool {
 	}
 	return false
 }
+
+// MacOS configures macOS runners in tart VMs on separate Macs.
+type MacOS struct {
+	Enabled       bool      `toml:"enabled"`
+	SSHKeyFile    string    `toml:"ssh_key_file"`   // default windows.ssh_key_file
+	RunnerVersion string    `toml:"runner_version"` // default: latest actions/runner release
+	Hosts         []MacHost `toml:"host"`
+}
+
+// MacHost is a Mac runner-warden drives over SSH. Its tart VM stays running
+// (keep it up with a launchd agent); each job gets a fresh JIT runner inside
+// it, one at a time, started as a launchd job in the guest's GUI session.
+type MacHost struct {
+	Name     string   `toml:"name"`
+	Address  string   `toml:"address"`   // host or host:port (default port 22)
+	SSHUser  string   `toml:"ssh_user"`  // the user that owns the tart VM
+	VM       string   `toml:"vm"`        // tart VM name
+	Tart     string   `toml:"tart"`      // default /opt/homebrew/bin/tart
+	GuestUID int      `toml:"guest_uid"` // the guest user's uid; default 501
+	Targets  []string `toml:"targets"`   // owners or owner/repo; ["*"] for any
+}
+
+// SSHAddr is the host's address with the port filled in.
+func (h MacHost) SSHAddr() string {
+	if _, _, err := net.SplitHostPort(h.Address); err == nil {
+		return h.Address
+	}
+	return net.JoinHostPort(h.Address, "22")
+}
+
+// Serves reports whether the host may run jobs for a target.
+func (h MacHost) Serves(t core.Target) bool { return WindowsVM{Targets: h.Targets}.Serves(t) }
 
 // Hang configures hung-job detection.
 type Hang struct {
@@ -437,6 +470,14 @@ func (c *Config) ApplyDefaults() {
 	def(&c.Windows.SSHUser, "runner")
 	def(&c.Windows.SSHKeyFile, filepath.Join(c.StateDir, "windows", "id_ed25519"))
 	def(&c.Linux.SSHKeyFile, c.Windows.SSHKeyFile)
+	def(&c.MacOS.SSHKeyFile, c.Windows.SSHKeyFile)
+	for i := range c.MacOS.Hosts {
+		h := &c.MacOS.Hosts[i]
+		def(&h.Tart, "/opt/homebrew/bin/tart")
+		if h.GuestUID == 0 {
+			h.GuestUID = 501
+		}
+	}
 	for i := range c.Linux.Hosts {
 		h := &c.Linux.Hosts[i]
 		def(&h.SSHUser, "root")
@@ -596,8 +637,35 @@ func (c *Config) Validate() error {
 			add("linux.host %q: binary must be an absolute path without spaces or quotes", h.Name)
 		}
 	}
-	if !c.Linux.Enabled && !c.Windows.Enabled {
-		add("enable at least one of [linux] or [windows]")
+	for i, h := range c.MacOS.Hosts {
+		if naming.ValidatePrefix(h.Name) != nil {
+			add("macos.host[%d]: name must be lowercase letters, digits and hyphens", i)
+		}
+		if vmNames[h.Name] {
+			add("macos.host %q: name already used by another host or vm", h.Name)
+		}
+		vmNames[h.Name] = true
+		if h.Address == "" || strings.ContainsAny(h.Address, " /@") {
+			add("macos.host %q: address must be a host or host:port", h.Name)
+		}
+		if h.SSHUser == "" || !shellSafe(h.SSHUser) {
+			add("macos.host %q: ssh_user is required", h.Name)
+		}
+		if !shellSafe(h.VM) {
+			add("macos.host %q: vm must be a tart VM name (letters, digits, - _ .)", h.Name)
+		}
+		if !strings.HasPrefix(h.Tart, "/") || strings.ContainsAny(h.Tart, " '\"$`\\") {
+			add("macos.host %q: tart must be an absolute path without spaces or quotes", h.Name)
+		}
+		if len(h.Targets) == 0 {
+			add("macos.host %q: set targets (owners or owner/repo; [\"*\"] for any)", h.Name)
+		}
+	}
+	if c.MacOS.Enabled && len(c.MacOS.Hosts) == 0 {
+		add("macos: define at least one [[macos.host]]")
+	}
+	if !c.Linux.Enabled && !c.Windows.Enabled && !c.MacOS.Enabled {
+		add("enable at least one of [linux], [windows] or [macos]")
 	}
 	for i, ca := range c.Caches {
 		if ca.Name == "" || ca.HostPath == "" {
@@ -637,8 +705,11 @@ func (c *Config) Validate() error {
 			add("target[%d]: runner_group only applies to org targets", i)
 		}
 		for _, o := range t.OSes() {
-			if o != core.Linux && o != core.Windows {
+			if o != core.Linux && o != core.Windows && o != core.MacOS {
 				add("target[%d]: unsupported os %q", i, o)
+			}
+			if o == core.MacOS && !c.MacOS.Enabled {
+				add("target[%d]: macos requested but [macos] is not enabled", i)
 			}
 			if o == core.Windows && !c.Windows.Enabled {
 				add("target[%d]: windows requested but [windows] is not enabled", i)
@@ -657,3 +728,13 @@ func (c *Config) Validate() error {
 }
 
 func regexpSafe(s string) bool { return naming.ValidatePrefix(s) == nil }
+
+// shellSafe reports a non-empty name of letters, digits and - _ . only.
+func shellSafe(s string) bool {
+	if s == "" {
+		return false
+	}
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.'
+	})
+}

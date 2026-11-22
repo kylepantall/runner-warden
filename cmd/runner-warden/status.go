@@ -141,7 +141,7 @@ func frame(text string, width, height int) string {
 // machineOf names where a runner runs: its VM or remote host, else this host
 // for Linux.
 func machineOf(rep daemon.StatusReport, r daemon.RunnerStatus) string {
-	if r.OS == "windows" || r.VM != "" {
+	if r.OS != "linux" || r.VM != "" {
 		return dash(r.VM)
 	}
 	return dash(rep.Hostname)
@@ -180,6 +180,13 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 			state = "UNREACHABLE"
 		}
 		fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", h, "linux host", state, "-", busyOn[h])
+	}
+	for _, h := range rep.MacHostNames {
+		state := "reachable"
+		if !rep.MacHosts[h] {
+			state = "UNREACHABLE"
+		}
+		fmt.Fprintf(mw, "%s\t%s\t%s\t%s\t%d\n", h, "macos host", state, "-", busyOn[h])
 	}
 	vms := rep.WindowsVMs
 	if len(vms) == 0 { // daemon older than the client

@@ -1,34 +1,15 @@
 // Package linuxhost runs Linux runners on separate machines. The daemon keeps
 // the scale sets and the scheduler; a remote host only runs the Docker
 // backend, driven one operation at a time by "runner-warden agent" over SSH.
-//
-// Pool combines this host's backend with the remote ones. A runner goes to a
-// remote host when its spec carries HostEnv; its handle's BackendID is then
-// "<host>/<container id>", which is how every later call finds the host.
+// Hosts join a hostpool.Pool.
 package linuxhost
 
 import (
-	"strings"
 	"time"
 
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 )
-
-// HostEnv in a RunnerSpec's Env names the remote host to start it on. The
-// pool removes it before the spec reaches a backend.
-const HostEnv = "RUNNER_WARDEN_HOST"
-
-// HostOf splits a BackendID into the remote host and the id on that host;
-// host is "" for a runner on this machine.
-func HostOf(backendID string) (host, id string) {
-	if h, rest, ok := strings.Cut(backendID, "/"); ok {
-		return h, rest
-	}
-	return "", backendID
-}
-
-func onHost(host, id string) string { return host + "/" + id }
 
 // Operations an agent serves.
 const (

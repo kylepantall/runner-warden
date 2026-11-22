@@ -135,86 +135,28 @@ func TestProbeInstallsAndPrepares(t *testing.T) {
 	}
 }
 
-func TestPoolRoutesByHost(t *testing.T) {
+func TestHostStartSendsSpecOnStdin(t *testing.T) {
 	ctx := context.Background()
-	local, remote := &fakeBackend{}, &fakeBackend{}
+	remote := &fakeBackend{}
 	ssh := &fakeSSH{be: remote, version: "v9"}
 	h := newTestHost(t, ssh)
-	p := NewPool(local, []*Host{h}, nil)
-	if _, err := p.Start(ctx, core.RunnerSpec{Name: "r1", JITConfig: "j", Env: map[string]string{HostEnv: "pc"}}); err == nil {
+	if _, err := h.Start(ctx, core.RunnerSpec{Name: "r1", JITConfig: "j"}); err == nil {
 		t.Fatal("a host that never probed is down")
 	}
 	if err := h.Probe(ctx); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{HostEnv: "pc", "A": "b"}
-	hd, err := p.Start(ctx, core.RunnerSpec{Name: "r1", JITConfig: "j", Image: "job-img", Env: env})
-	if err != nil || hd.BackendID != "pc/c-r1" {
+	hd, err := h.Start(ctx, core.RunnerSpec{Name: "r1", JITConfig: "j", Image: "job-img"})
+	if err != nil || hd.BackendID != "c-r1" {
 		t.Fatalf("%+v %v", hd, err)
 	}
-	if env[HostEnv] != "pc" {
-		t.Fatal("caller's env map changed")
-	}
-	got := remote.started[0]
-	if _, ok := got.Env[HostEnv]; ok || got.Env["A"] != "b" || got.JITConfig != "j" || got.Image != "" {
+	if got := remote.started[0]; got.JITConfig != "j" || got.Image != "" {
 		t.Fatalf("host got %+v (an image it cannot pull falls back to the default)", got)
 	}
-	if u, err := p.Stats(ctx, hd); err != nil || !u.Alive || u.CPUSeconds != 7 {
+	if u, err := h.Stats(ctx, hd); err != nil || !u.Alive || u.CPUSeconds != 7 {
 		t.Fatalf("stats %+v %v", u, err)
 	}
-	if _, err := p.Start(ctx, core.RunnerSpec{Name: "r2", JITConfig: "j"}); err != nil || len(local.started) != 1 {
-		t.Fatal("no host: start here")
-	}
-	if err := p.Cleanup(ctx, "r1"); err != nil || len(remote.cleaned) != 1 || len(local.cleaned) != 0 {
-		t.Fatalf("cleanup r1: local %v remote %v", local.cleaned, remote.cleaned)
-	}
-	_ = p.Cleanup(ctx, "r9") // unknown: everywhere
-	if len(local.cleaned) != 1 || len(remote.cleaned) != 2 {
-		t.Fatalf("cleanup unknown: local %v remote %v", local.cleaned, remote.cleaned)
-	}
-}
-
-func TestPoolListKeepsLastHostListBriefly(t *testing.T) {
-	ctx := context.Background()
-	local, remote := &fakeBackend{list: []core.Handle{{RunnerName: "here", BackendID: "c1"}}}, &fakeBackend{list: []core.Handle{{RunnerName: "there", BackendID: "c2"}}}
-	ssh := &fakeSSH{be: remote, version: "v9"}
-	h := newTestHost(t, ssh)
-	p := NewPool(local, []*Host{h}, nil)
-	_ = h.Probe(ctx)
-	hs, err := p.List(ctx)
-	if err != nil || len(hs) != 2 || hs[1].BackendID != "pc/c2" {
-		t.Fatalf("%+v %v", hs, err)
-	}
-	ssh.down = true
-	_ = h.Probe(ctx)
-	if hs, _ := p.List(ctx); len(hs) != 2 {
-		t.Fatalf("a short outage keeps the host's runners: %+v", hs)
-	}
-	p.mu.Lock()
-	p.last["pc"] = listed{at: time.Now().Add(-listGrace - time.Second), hs: p.last["pc"].hs}
-	p.mu.Unlock()
-	if hs, _ := p.List(ctx); len(hs) != 1 {
-		t.Fatalf("a long outage drops them: %+v", hs)
-	}
-}
-
-func TestHostOf(t *testing.T) {
-	if h, id := HostOf("pc/abc"); h != "pc" || id != "abc" {
-		t.Fatal(h, id)
-	}
-	if h, id := HostOf("abc"); h != "" || id != "abc" {
-		t.Fatal(h, id)
-	}
-}
-
-func TestPrepareProbesHostsBeforeReturning(t *testing.T) {
-	local, remote := &fakeBackend{}, &fakeBackend{list: []core.Handle{{RunnerName: "there", BackendID: "c2"}}}
-	h := newTestHost(t, &fakeSSH{be: remote, version: "v9"})
-	p := NewPool(local, []*Host{h}, nil)
-	if err := p.Prepare(context.Background()); err != nil || !h.Up() {
-		t.Fatalf("restore follows Prepare and must see the host: %v up=%v", err, h.Up())
-	}
-	if hs, _ := p.List(context.Background()); len(hs) != 1 || hs[0].BackendID != "pc/c2" {
-		t.Fatalf("%+v", hs)
+	if err := h.Cleanup(ctx, "r1"); err != nil || len(remote.cleaned) != 1 {
+		t.Fatalf("cleanup %v %v", err, remote.cleaned)
 	}
 }

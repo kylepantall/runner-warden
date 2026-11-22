@@ -364,6 +364,10 @@ type StatusReport struct {
 	// LinuxHostNames order.
 	LinuxHosts     map[string]bool `json:"linux_hosts,omitempty"`
 	LinuxHostNames []string        `json:"linux_host_names,omitempty"`
+	// MacHosts maps every [[macos.host]] to reachable or not, in
+	// MacHostNames order.
+	MacHosts     map[string]bool `json:"mac_hosts,omitempty"`
+	MacHostNames []string        `json:"mac_host_names,omitempty"`
 	// WindowsVMs lists every configured VM, up or not.
 	WindowsVMs []string `json:"windows_vms,omitempty"`
 	// Persistent are containers that outlive runners; their memory counts as
@@ -420,6 +424,12 @@ func (d *Daemon) status(ctx context.Context) StatusReport {
 		rep.LinuxHosts = lh.HostsUp()
 		for _, h := range d.cfg.Linux.Hosts {
 			rep.LinuxHostNames = append(rep.LinuxHostNames, h.Name)
+		}
+	}
+	if mh, ok := d.backends[core.MacOS].(linuxHosts); ok {
+		rep.MacHosts = mh.HostsUp()
+		for _, h := range d.cfg.MacOS.Hosts {
+			rep.MacHostNames = append(rep.MacHostNames, h.Name)
 		}
 	}
 	if d.win != nil {

@@ -1169,7 +1169,8 @@ func (s *Scheduler) candidates() []cand {
 func (s *Scheduler) oldestWaiter() *admission.Waiter {
 	var ws []admission.Waiter
 	for _, r := range s.heads() {
-		if s.fitsEver(r) {
+		// A job only hosts can run never waits for this host's memory.
+		if s.fitsEver(r) && !s.o.HostsOnly[r.lane.OS] {
 			ws = append(ws, s.waiter(r))
 		}
 	}
@@ -1288,7 +1289,7 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 		s.runners[tok].remote = true
 		return true
 	}
-	if local && !blocked {
+	if local && !blocked && !s.o.HostsOnly[rec.lane.OS] {
 		if res, vmKey, ok := s.reserveRunner(rec, tok, s.fullReq(rec)); ok {
 			s.startRunner(rec, tok, s.seq, res, false, vmKey, "")
 			return true
@@ -1309,9 +1310,6 @@ func (s *Scheduler) tryGrant(c cand, oldest *admission.Waiter) bool {
 // freeHost is the first reachable remote host with a free slot serving the
 // lane's target, or "".
 func (s *Scheduler) freeHost(lk LaneKey) string {
-	if lk.OS != core.Linux {
-		return ""
-	}
 	used := map[string]int{}
 	for _, rr := range s.runners {
 		if rr.host != "" {
@@ -1319,7 +1317,11 @@ func (s *Scheduler) freeHost(lk LaneKey) string {
 		}
 	}
 	for _, h := range s.o.LinuxHosts {
-		if used[h.Name] >= h.Slots || (h.Serves != nil && !h.Serves(lk.Target)) {
+		os := h.OS
+		if os == "" {
+			os = core.Linux
+		}
+		if os != lk.OS || used[h.Name] >= h.Slots || (h.Serves != nil && !h.Serves(lk.Target)) {
 			continue
 		}
 		if s.o.HostUp != nil && !s.o.HostUp(h.Name) {
@@ -1461,7 +1463,7 @@ func (s *Scheduler) promote() {
 			)
 		})
 		for _, rec := range cs {
-			if local, _ := s.canStartRunner(rec.lane.Target); !local {
+			if local, _ := s.canStartRunner(rec.lane.Target); !local || s.o.HostsOnly[rec.lane.OS] {
 				continue
 			}
 			s.seq++
