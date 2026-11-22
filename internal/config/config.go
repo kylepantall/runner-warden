@@ -245,6 +245,9 @@ type WindowsHost struct {
 	SSHUser   string   `toml:"ssh_user"`   // default windows.ssh_user
 	TaskLogon string   `toml:"task_logon"` // default windows.task_logon
 	Targets   []string `toml:"targets"`    // as for [[windows.vm]]
+	// MaxConcurrent is how many jobs run on the host at once (default 1),
+	// each with its own runner install and work dir.
+	MaxConcurrent int `toml:"max_concurrent"`
 }
 
 // SSHAddr is the host's address with the port filled in.
@@ -262,7 +265,7 @@ func (w Windows) Members() []WindowsVM {
 	for _, h := range w.Hosts {
 		out = append(out, WindowsVM{
 			Name: h.Name, Targets: h.Targets, Remote: h.SSHAddr(),
-			SSHUser: h.SSHUser, TaskLogon: h.TaskLogon,
+			SSHUser: h.SSHUser, TaskLogon: h.TaskLogon, Slots: max(h.MaxConcurrent, 1),
 		})
 	}
 	return out
@@ -284,7 +287,11 @@ type WindowsVM struct {
 	Remote    string `toml:"-"` // SSH address of a separate machine
 	SSHUser   string `toml:"-"` // overrides windows.ssh_user
 	TaskLogon string `toml:"-"` // overrides windows.task_logon
+	Slots     int    `toml:"-"` // jobs at once on a host; a VM runs one
 }
+
+// JobSlots is how many jobs the member runs at once.
+func (v WindowsVM) JobSlots() int { return max(v.Slots, 1) }
 
 // IsRemote reports a [[windows.host]] member.
 func (v WindowsVM) IsRemote() bool { return v.Remote != "" }
@@ -668,6 +675,9 @@ func (c *Config) Validate() error {
 		}
 		if len(h.Targets) == 0 {
 			add("windows.host %q: set targets (owners or owner/repo; [\"*\"] for any)", h.Name)
+		}
+		if h.MaxConcurrent < 0 || h.MaxConcurrent > 16 {
+			add("windows.host %q: max_concurrent must be 1-16", h.Name)
 		}
 		if h.TaskLogon != "" && h.TaskLogon != "Interactive" && h.TaskLogon != "S4U" {
 			add("windows.host %q: task_logon must be Interactive or S4U", h.Name)

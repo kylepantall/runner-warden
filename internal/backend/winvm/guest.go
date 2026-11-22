@@ -59,6 +59,7 @@ func (j jobPaths) WorkFolder() string { return winJoin(j.Dir(), "_work") }
 func (j jobPaths) Cfg() string        { return winJoin(j.Dir(), "jit.cfg") }
 func (j jobPaths) Cmd() string        { return winJoin(j.Dir(), "run-task.cmd") }
 func (j jobPaths) Log() string        { return winJoin(j.Dir(), "runner.log") }
+func (j jobPaths) Temp() string       { return winJoin(j.Dir(), "tmp") }
 func (j jobPaths) Diag() string       { return winJoin(j.RunnerDir, "_diag") }
 func (j jobPaths) Task() string       { return TaskName(j.Runner) }
 
@@ -76,6 +77,10 @@ func (j jobPaths) taskCmd() string {
 		"setlocal DisableDelayedExpansion",
 		`for /f "usebackq delims=" %%a in ("` + j.Cfg() + `") do set "ACTIONS_RUNNER_INPUT_JITCONFIG=%%a"`,
 		`del /f /q "` + j.Cfg() + `"`,
+		// The job's own TEMP: it goes with the job dir, and jobs sharing a
+		// machine (or a person using it) never clean up each other's files.
+		`set "TEMP=` + j.Temp() + `"`,
+		`set "TMP=` + j.Temp() + `"`,
 		`set "RUNNER_TOOL_CACHE=` + j.ToolCache() + `"`,
 		`set "AGENT_TOOLSDIRECTORY=` + j.ToolCache() + `"`,
 		// `shell: bash` must find Git Bash before WSL's System32\bash.exe,
@@ -95,7 +100,7 @@ Stop-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
 function Get-RwProcs {
   Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and (
     ($_.CommandLine -and $_.CommandLine.IndexOf($jd,[StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-    ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($rd,[StringComparison]::OrdinalIgnoreCase) -and @('Runner.Listener.exe','Runner.Worker.exe') -contains $_.Name)) }
+    ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($rd.TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase) -and @('Runner.Listener.exe','Runner.Worker.exe') -contains $_.Name)) }
 }
 for ($i=0; $i -lt ` + strconv.Itoa(graceSecs) + `; $i++) { if (-not @(Get-RwProcs).Count) { break }; Start-Sleep 1 }
 foreach ($p in @(Get-RwProcs)) { & taskkill.exe /T /F /PID $p.ProcessId 2>&1 | Out-Null }
@@ -104,14 +109,24 @@ foreach ($p in @(Get-RwProcs)) { & taskkill.exe /T /F /PID $p.ProcessId 2>&1 | O
 
 // startJobScript prepares the job dir, writes the JIT config (from stdin) and
 // starts the one-shot Scheduled Task. The runner is not an SSH child.
-func startJobScript(j jobPaths, logon string) string {
-	return psPrelude + `$name=` + psq(j.Runner) + `; $dir=` + psq(j.Dir()) + `; $root=` + psq(j.WorkRoot) + `; $rd=` + psq(j.RunnerDir) + `
-# sweep leftovers of earlier jobs (one job per VM)
+// shared hosts run several jobs at once: only this slot's leftover runner
+// processes are swept there; other jobs' tasks and dirs stay (runner-warden
+// cleans those up itself).
+func startJobScript(j jobPaths, logon string, shared bool) string {
+	sweep := `# sweep leftovers of earlier jobs (one job per VM)
 Get-ScheduledTask -TaskName 'rw-*' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -ne (` + psq(j.Task()) + `) } | ForEach-Object { Stop-ScheduledTask -InputObject $_ -ErrorAction SilentlyContinue; Unregister-ScheduledTask -InputObject $_ -Confirm:$false -ErrorAction SilentlyContinue }
 foreach ($p in @(Get-Process -Name 'Runner.Listener','Runner.Worker' -ErrorAction SilentlyContinue)) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
 if (Test-Path $root) { Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $name -and (Test-Path (Join-Path $_.FullName '.rw-job')) } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } }
-foreach ($f in '.runner','.credentials','.credentials_rsaparams') { Remove-Item (Join-Path $rd $f) -Force -ErrorAction SilentlyContinue }
+`
+	if shared {
+		sweep = `# sweep this slot's leftover runner (other jobs share the machine)
+foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe' OR Name='Runner.Worker.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($rd.TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase) })) { & taskkill.exe /T /F /PID $p.ProcessId 2>&1 | Out-Null }
+`
+	}
+	return psPrelude + `$name=` + psq(j.Runner) + `; $dir=` + psq(j.Dir()) + `; $root=` + psq(j.WorkRoot) + `; $rd=` + psq(j.RunnerDir) + `
+` + sweep + `foreach ($f in '.runner','.credentials','.credentials_rsaparams') { Remove-Item (Join-Path $rd $f) -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path ` + psq(j.WorkFolder()) + ` | Out-Null
+New-Item -ItemType Directory -Force -Path ` + psq(j.Temp()) + ` | Out-Null
 New-Item -ItemType Directory -Force -Path ` + psq(j.ToolCache()) + ` | Out-Null
 New-Item -ItemType File -Force -Path (Join-Path $dir '.rw-job') | Out-Null
 $cfg=[Console]::In.ReadToEnd().Trim()
@@ -138,11 +153,16 @@ func stopScript(j jobPaths, graceSecs int) string {
 }
 
 // cleanupScript is idempotent: it removes everything the runner left.
-func cleanupScript(j jobPaths) string {
+// wipeTemp also empties the user's TEMP: only on a dedicated VM, never on a
+// host someone uses (jobs there have their own TEMP in the job dir).
+func cleanupScript(j jobPaths, wipeTemp bool) string {
+	temp := ""
+	if wipeTemp {
+		temp = "Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\n"
+	}
 	return "$ErrorActionPreference='Continue'\n" + j.killSnippet(0) + `Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
 for ($i=0; $i -lt 5 -and (Test-Path $jd); $i++) { Remove-Item $jd -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path $jd) { & cmd.exe /d /c ('rd /s /q "' + $jd + '"') 2>&1 | Out-Null }; if (Test-Path $jd) { Start-Sleep 2 } }
-Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-$cut=(Get-Date).AddDays(-7)
+` + temp + `$cut=(Get-Date).AddDays(-7)
 Get-ChildItem (Join-Path $rd '_diag') -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut } | Remove-Item -Force -ErrorAction SilentlyContinue
 if (Test-Path $jd) { 'leftover=1' } else { 'leftover=0' }
 `
@@ -153,7 +173,8 @@ func statsScript(j jobPaths) string {
 	return `$ErrorActionPreference='SilentlyContinue'
 $t=Get-ScheduledTask -TaskName ` + psq(j.Task()) + `
 $state='Missing'; if ($t) { $state=[string]$t.State }
-$procs=@(Get-Process -Name 'Runner.Listener','Runner.Worker').Count
+$rd=` + psq(j.RunnerDir) + `
+$procs=@(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe' OR Name='Runner.Worker.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($rd.TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase) }).Count
 $log=0; $i=Get-Item ` + psq(j.Log()) + `; if ($i) { $log=$i.Length }
 $diag=0; $m=Get-ChildItem ` + psq(j.Diag()) + ` -File | Measure-Object Length -Sum; if ($m.Sum) { $diag=$m.Sum }
 $cpu=[long]((Get-Process | Measure-Object CPU -Sum).Sum)

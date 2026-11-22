@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -119,8 +120,9 @@ type Pool struct {
 	vms        map[string]config.WindowsVM
 	order      []string
 	up         map[string]bool
-	ready      map[string]bool // ssh answered since the container started
-	claimed    map[string]bool
+	ready      map[string]bool   // ssh answered since the container started
+	claims     map[string]int    // Pick claims not yet started, per member
+	stopping   map[string]bool   // VMs being stopped: Pick keeps away
 	pkgDone    map[string]string // vm -> packagesKey last ensured
 	pkgMu      sync.Mutex        // one EnsurePackages at a time
 	lastActive map[string]time.Time
@@ -218,7 +220,7 @@ func newPool(cfg Config, api dockerAPI, exec func(config.WindowsVM) (Exec, error
 		cfg: cfg, log: log, api: api, exec: exec,
 		now: time.Now, sleep: sleepCtx,
 		vms: map[string]config.WindowsVM{}, up: map[string]bool{}, ready: map[string]bool{},
-		claimed: map[string]bool{}, lastActive: map[string]time.Time{}, pkgDone: map[string]string{},
+		claims: map[string]int{}, stopping: map[string]bool{}, lastActive: map[string]time.Time{}, pkgDone: map[string]string{},
 		runners: map[string]*runnerRec{}, execs: map[string]Exec{}, logBytes: map[string]int64{}, vmLocks: map[string]*sync.Mutex{},
 		version: cfg.Windows.RunnerVersion,
 	}
@@ -250,7 +252,50 @@ func (p *Pool) vm(name string) (config.WindowsVM, error) {
 }
 
 func (p *Pool) paths(runner string) jobPaths {
-	return jobPaths{Runner: runner, RunnerDir: p.cfg.Windows.RunnerDir, WorkRoot: p.cfg.Windows.WorkDir}
+	p.mu.Lock()
+	slot := 0
+	if r := p.runners[runner]; r != nil {
+		slot = r.Slot
+	}
+	p.mu.Unlock()
+	return jobPaths{Runner: runner, RunnerDir: slotDir(p.cfg.Windows.RunnerDir, slot), WorkRoot: p.cfg.Windows.WorkDir}
+}
+
+// slotDir is the runner install of a job slot: slot 1 (and 0, a runner from
+// before slots) uses runner_dir, slot n uses runner_dir-s<n>, so concurrent
+// runners never share .runner, credentials or _diag.
+func slotDir(base string, slot int) string {
+	if slot <= 1 {
+		return base
+	}
+	return base + "-s" + strconv.Itoa(slot)
+}
+
+// runnersOnLocked counts vm's runners. Caller holds p.mu.
+func (p *Pool) runnersOnLocked(vm string) int {
+	n := 0
+	for _, r := range p.runners {
+		if r.VM == vm {
+			n++
+		}
+	}
+	return n
+}
+
+// freeSlotLocked is vm's lowest job slot no runner holds. Caller holds p.mu.
+func (p *Pool) freeSlotLocked(vm string) (int, bool) {
+	used := map[int]bool{}
+	for _, r := range p.runners {
+		if r.VM == vm {
+			used[max(r.Slot, 1)] = true
+		}
+	}
+	for s := 1; s <= p.vms[vm].JobSlots(); s++ {
+		if !used[s] {
+			return s, true
+		}
+	}
+	return 0, false
 }
 
 // Caps reports the limits: FixedMemBytes is the largest VM; use MemFor for
@@ -264,7 +309,10 @@ func (p *Pool) Caps() core.Caps {
 	if m := p.cfg.Windows.MaxConcurrent; m > 0 {
 		n = min(n, m)
 	}
-	return core.Caps{OS: core.Windows, FixedMemBytes: mem, MaxConcurrent: n + len(p.cfg.Windows.Hosts)}
+	for _, h := range p.cfg.Windows.Hosts {
+		n += max(h.MaxConcurrent, 1)
+	}
+	return core.Caps{OS: core.Windows, FixedMemBytes: mem, MaxConcurrent: n}
 }
 
 // MemFor is the RAM a VM holds on this host while its container is up; 0 for
@@ -310,22 +358,17 @@ func (p *Pool) VMFor(runner string) (string, bool) {
 func (p *Pool) WorkFolder(_, runner string) string { return p.paths(runner).WorkFolder() }
 
 func (p *Pool) busyLocked(vm string) bool {
-	if p.claimed[vm] {
+	if p.stopping[vm] {
 		return true
 	}
-	for _, r := range p.runners {
-		if r.VM == vm {
-			return true
-		}
-	}
-	return false
+	return p.claims[vm]+p.runnersOnLocked(vm) >= p.vms[vm].JobSlots()
 }
 
 // licencesLocked counts VMs that are up or about to be, except skip.
 func (p *Pool) licencesLocked(skip string) int {
 	n := 0
 	for name, v := range p.vms {
-		if name != skip && !v.IsRemote() && (p.up[name] || p.claimed[name]) {
+		if name != skip && !v.IsRemote() && (p.up[name] || p.claims[name] > 0 || p.stopping[name]) {
 			n++
 		}
 	}
@@ -350,7 +393,7 @@ func (p *Pool) Pick(target core.Target) (string, bool) {
 			continue
 		}
 		if p.up[name] {
-			p.claimed[name] = true
+			p.claims[name]++
 			return name, true
 		}
 		if cold == "" && !p.vms[name].IsRemote() { // a down host is not booted
@@ -360,7 +403,7 @@ func (p *Pool) Pick(target core.Target) (string, bool) {
 	if cold == "" || p.licencesLocked(cold) >= p.licenceCap() {
 		return "", false
 	}
-	p.claimed[cold] = true
+	p.claims[cold]++
 	return cold, true
 }
 
@@ -401,7 +444,7 @@ func (p *Pool) PickNamed(vm string, target core.Target) (string, bool) {
 	if !p.up[vm] && (v.IsRemote() || p.licencesLocked(vm) >= p.licenceCap()) {
 		return "", false
 	}
-	p.claimed[vm] = true
+	p.claims[vm]++
 	return vm, true
 }
 
@@ -422,7 +465,9 @@ func (p *Pool) PeekNamed(vm string) (mem int64, up, remote, idle bool) {
 // Release drops a claim made by Pick that will not reach Start.
 func (p *Pool) Release(vm string) {
 	p.mu.Lock()
-	delete(p.claimed, vm)
+	if p.claims[vm] > 0 {
+		p.claims[vm]--
+	}
 	p.lastActive[vm] = p.now()
 	p.mu.Unlock()
 }

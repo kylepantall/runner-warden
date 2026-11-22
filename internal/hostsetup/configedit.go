@@ -42,7 +42,7 @@ type Host struct {
 	Address       string
 	SSHUser       string
 	Targets       []string
-	MaxConcurrent int    // linux, wsl
+	MaxConcurrent int    // linux, wsl, windows
 	Exec          string // linux, wsl
 	VM            string // macos
 	GuestUID      int    // macos

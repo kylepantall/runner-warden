@@ -14,10 +14,10 @@ func TestToolCacheOutlivesTheJob(t *testing.T) {
 	if !strings.Contains(j.taskCmd(), `set "RUNNER_TOOL_CACHE=`+tc+`"`) {
 		t.Fatal("runner does not get the persistent tool cache")
 	}
-	if !strings.Contains(startJobScript(j, "Interactive"), tc) {
+	if !strings.Contains(startJobScript(j, "Interactive", false), tc) {
 		t.Fatal("tool cache dir is not created before the job")
 	}
-	if strings.Contains(cleanupScript(j), tc) {
+	if strings.Contains(cleanupScript(j, true), tc) {
 		t.Fatal("cleanup must not touch the tool cache")
 	}
 }

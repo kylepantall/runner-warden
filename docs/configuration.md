@@ -109,19 +109,20 @@ name = "pc"
 address = "pc.example.ts.net"    # host or host:port (default 22)
 ssh_user = "me"                  # an administrator; default windows.ssh_user
 task_logon = "S4U"               # default S4U: runs whether or not anyone is signed in
+max_concurrent = 2               # jobs at once (default 1), each with its own runner install and TEMP
 targets = ["my-org"]
 ```
 
 ## Windows hosts
 
-A `[[windows.host]]` runs Windows jobs on another machine, one at a time, like a VM that is always on.
+A `[[windows.host]]` runs Windows jobs on another machine, like a VM that is always on: one at a time, or `max_concurrent` at once.
 
 | Aspect | Behaviour |
 |---|---|
 | Setup | `runner-warden windows host-script <host>` prints PowerShell to run once, elevated, on the machine (OpenSSH Server + runner-warden's key). Then `runner-warden windows host-setup <host> [--script tools.ps1]` installs the baseline and runner files |
 | Routing | Free local VMs first, then hosts. A host that does not answer over SSH is skipped and re-checked every minute |
 | Budget | Uses none of this host's memory or CPU and no `max_concurrent` licence |
-| Per job | Ephemeral JIT runner, work dir wiped, tool cache kept at `<work_dir>\_tool` |
+| Per job | Ephemeral JIT runner, work dir and its own TEMP wiped, tool cache kept at `<work_dir>\_tool`. With `max_concurrent` > 1 each slot has its own runner install (`<runner_dir>-s<n>`); jobs never sweep each other, and the signed-in user's TEMP is never touched |
 | Limits | The machine must stay on and reachable; runner-warden cannot restart it. Hang detection reads whole-machine CPU and the runner logs |
 
 ## Linking machines

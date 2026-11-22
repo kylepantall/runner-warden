@@ -93,7 +93,7 @@ func hostAddCmd() *cobra.Command {
 	fl.StringVar(&f.distro, "distro", "", "WSL distro (wsl)")
 	fl.StringVar(&f.vm, "vm", "", "tart VM (macos)")
 	fl.StringVar(&f.tart, "tart", "/opt/homebrew/bin/tart", "tart binary on the Mac (macos)")
-	fl.IntVar(&f.jobs, "jobs", 0, "jobs at once (linux, wsl; default 2)")
+	fl.IntVar(&f.jobs, "jobs", 0, "jobs at once (linux, wsl: default 2; windows: default 1)")
 	fl.BoolVar(&f.yes, "yes", false, "accept defaults and every fix without asking")
 	fl.BoolVar(&f.noRestart, "no-restart", false, "edit the config only; restart the service yourself")
 	return c
@@ -332,8 +332,11 @@ func (w *hostWizard) run(ctx context.Context) error {
 	if len(h.Targets) == 0 {
 		return errors.New("it must serve at least one org or repo")
 	}
-	if k == hostsetup.KindLinux || k == hostsetup.KindWSL {
+	if k == hostsetup.KindLinux || k == hostsetup.KindWSL || k == hostsetup.KindWindows {
 		def := 2
+		if k == hostsetup.KindWindows {
+			def = 1
+		}
 		if w.f.jobs > 0 {
 			def = w.f.jobs
 		}
