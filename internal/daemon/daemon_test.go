@@ -343,8 +343,11 @@ func TestAutoCacheMountsAndEnv(t *testing.T) {
 	if s := d.autoCache(&spec, lane, scheduler.Grant{Host: "pc", Job: core.Job{Owner: "org", Repo: "app"}}); s != "org" {
 		t.Fatalf("scope %q", s)
 	}
-	if len(spec.Mounts) != 1 || spec.Mounts[0].ContainerPath != "/opt/rw-cache" || !strings.HasSuffix(spec.Mounts[0].HostPath, "/main/auto/org") {
-		t.Fatalf("%+v", spec.Mounts)
+	// Same path inside: the runner passes its tool cache path to sibling
+	// job containers, whose binds are host paths.
+	m := spec.Mounts
+	if len(m) != 1 || m[0].ContainerPath != m[0].HostPath || !strings.HasSuffix(m[0].HostPath, "/main/auto/org") || spec.Env["RUNNER_TOOL_CACHE"] != m[0].HostPath+"/tool" {
+		t.Fatalf("%+v %v", m, spec.Env)
 	}
 	if _, ok := spec.Env["PUB_CACHE"]; ok || spec.Env["NUGET_PACKAGES"] == "" {
 		t.Fatalf("[[cache]] env must win: %v", spec.Env)

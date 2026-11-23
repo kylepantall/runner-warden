@@ -26,8 +26,8 @@ func TestScope(t *testing.T) {
 }
 
 func TestEnvForKeepsConfiguredCaches(t *testing.T) {
-	e := EnvFor(map[string]bool{"PUB_CACHE": true})
-	if _, ok := e["PUB_CACHE"]; ok || e["NUGET_PACKAGES"] != MountPath+"/nuget" || e["RUNNER_TOOL_CACHE"] != MountPath+"/tool" || e["RW_CACHE_DIR"] != MountPath {
+	e := EnvFor("/c/o", map[string]bool{"PUB_CACHE": true})
+	if _, ok := e["PUB_CACHE"]; ok || e["NUGET_PACKAGES"] != "/c/o/nuget" || e["RUNNER_TOOL_CACHE"] != "/c/o/tool" || e["RW_CACHE_DIR"] != "/c/o" {
 		t.Fatalf("%v", e)
 	}
 }

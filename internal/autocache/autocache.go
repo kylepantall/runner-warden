@@ -1,6 +1,8 @@
 // Package autocache keeps Linux jobs' tool cache and package-manager caches
 // on the machine: one directory per scope (a repo, or an owner), mounted into
-// the runner at MountPath with the tools' cache variables pointing into it.
+// the runner at the same path, with the tools' cache variables pointing into
+// it. The same path matters: the runner hands paths such as its tool cache to
+// sibling job containers (container: jobs), whose binds are host paths.
 // Usage is recorded per scope, and the least recently used scopes are removed
 // when the caches outgrow their budget.
 package autocache
@@ -17,30 +19,27 @@ import (
 	"github.com/kylepantall/runner-warden/internal/core"
 )
 
-// MountPath is where a scope's directory appears in the runner.
-const MountPath = "/opt/rw-cache"
-
 // usedFile marks a scope's last use; its mtime is the time.
 const usedFile = ".rw-last-used"
 
-// Env is what each tool is told; values are under MountPath.
-var Env = map[string]string{
+// vars maps each tool's variable to its dir under a scope's cache root.
+var vars = map[string]string{
 	// The cache root itself, so a workflow can tell a warm local cache is
 	// there and skip actions/cache (whose restore downloads even on a hit).
-	"RW_CACHE_DIR": MountPath,
+	"RW_CACHE_DIR": "",
 	// The runner's tool cache: setup-dotnet/node/java/go/python/dart/... keep
 	// each version they download.
-	"RUNNER_TOOL_CACHE":    MountPath + "/tool",
-	"AGENT_TOOLSDIRECTORY": MountPath + "/tool",
-	"NUGET_PACKAGES":       MountPath + "/nuget",
-	"npm_config_cache":     MountPath + "/npm",
-	"YARN_CACHE_FOLDER":    MountPath + "/yarn",
-	"PIP_CACHE_DIR":        MountPath + "/pip",
-	"GOMODCACHE":           MountPath + "/go/mod",
-	"GOCACHE":              MountPath + "/go/build",
-	"GRADLE_USER_HOME":     MountPath + "/gradle",
-	"PUB_CACHE":            MountPath + "/pub",
-	"TF_PLUGIN_CACHE_DIR":  MountPath + "/terraform",
+	"RUNNER_TOOL_CACHE":    "tool",
+	"AGENT_TOOLSDIRECTORY": "tool",
+	"NUGET_PACKAGES":       "nuget",
+	"npm_config_cache":     "npm",
+	"YARN_CACHE_FOLDER":    "yarn",
+	"PIP_CACHE_DIR":        "pip",
+	"GOMODCACHE":           "go/mod",
+	"GOCACHE":              "go/build",
+	"GRADLE_USER_HOME":     "gradle",
+	"PUB_CACHE":            "pub",
+	"TF_PLUGIN_CACHE_DIR":  "terraform",
 }
 
 // Scope is the cache a job uses: "owner" or "owner/repo".
@@ -63,18 +62,19 @@ func Dir(base, scope string) string {
 	return filepath.Join(base, filepath.FromSlash(strings.ReplaceAll(scope, "/", "__")))
 }
 
-// Mount is the bind for a scope's directory.
+// Mount is the bind for a scope's directory, at the same path in the runner.
 func Mount(base, scope string) core.Mount {
-	return core.Mount{HostPath: Dir(base, scope), ContainerPath: MountPath}
+	d := Dir(base, scope)
+	return core.Mount{HostPath: d, ContainerPath: d}
 }
 
-// EnvFor is Env without the variables keep names (set by [[cache]] entries,
-// which win).
-func EnvFor(keep map[string]bool) map[string]string {
+// EnvFor points each tool into root (a scope's Dir), leaving out the
+// variables keep names (set by [[cache]] entries, which win).
+func EnvFor(root string, keep map[string]bool) map[string]string {
 	out := map[string]string{}
-	for k, v := range Env {
+	for k, sub := range vars {
 		if !keep[k] {
-			out[k] = v
+			out[k] = filepath.Join(root, sub)
 		}
 	}
 	return out
@@ -91,10 +91,14 @@ func TouchDir(dir string, uid int) error {
 	if os.Geteuid() == 0 {
 		_ = os.Chown(dir, uid, uid)
 	}
-	// Terraform ignores a plugin cache dir that does not exist.
-	tf := filepath.Join(dir, "terraform")
-	if err := os.MkdirAll(tf, 0o755); err == nil && os.Geteuid() == 0 { //nolint:gosec // the runner user must reach it
-		_ = os.Chown(tf, uid, uid)
+	// Terraform ignores a plugin cache dir that does not exist, and the tool
+	// cache is bound into container: jobs, where Docker would make a missing
+	// one root's.
+	for _, sub := range []string{"terraform", "tool"} {
+		p := filepath.Join(dir, sub)
+		if err := os.MkdirAll(p, 0o755); err == nil && os.Geteuid() == 0 { //nolint:gosec // the runner user must reach it
+			_ = os.Chown(p, uid, uid)
+		}
 	}
 	f := filepath.Join(dir, usedFile)
 	now := time.Now()
