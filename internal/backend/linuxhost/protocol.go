@@ -7,6 +7,7 @@ package linuxhost
 import (
 	"time"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/config"
 	"github.com/kylepantall/runner-warden/internal/core"
 )
@@ -21,6 +22,7 @@ const (
 	OpCleanup = "cleanup"
 	OpList    = "list"
 	OpAdopt   = "adopt"
+	OpCaches  = "caches" // measure the automatic caches, trim them to CacheMax
 )
 
 // AgentConfig is the part of the daemon's Linux configuration a remote host
@@ -49,14 +51,19 @@ type Request struct {
 	Handle *core.Handle     `json:"handle,omitempty"`
 	Runner string           `json:"runner,omitempty"`
 	Grace  time.Duration    `json:"grace,omitempty"`
+	// OpCaches: the budget and the scopes in use on the host.
+	CacheMax   int64    `json:"cache_max,omitempty"`
+	CacheInUse []string `json:"cache_in_use,omitempty"`
 }
 
 // Response is the agent's answer, written as JSON on stdout.
 type Response struct {
-	Version string        `json:"version"`
-	Arch    string        `json:"arch,omitempty"`
-	Handle  core.Handle   `json:"handle,omitzero"`
-	Handles []core.Handle `json:"handles,omitempty"`
-	Usage   core.Usage    `json:"usage,omitzero"`
-	Error   string        `json:"error,omitempty"`
+	Version string            `json:"version"`
+	Arch    string            `json:"arch,omitempty"`
+	Handle  core.Handle       `json:"handle,omitzero"`
+	Handles []core.Handle     `json:"handles,omitempty"`
+	Usage   core.Usage        `json:"usage,omitzero"`
+	Caches  []autocache.Usage `json:"caches,omitempty"` // kept, most recent first
+	Removed []autocache.Usage `json:"removed,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }

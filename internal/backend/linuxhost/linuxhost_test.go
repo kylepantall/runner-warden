@@ -160,3 +160,12 @@ func TestHostStartSendsSpecOnStdin(t *testing.T) {
 		t.Fatalf("cleanup %v %v", err, remote.cleaned)
 	}
 }
+
+func TestHostTrimCachesAsksTheAgent(t *testing.T) {
+	ssh := &fakeSSH{be: &fakeBackend{}, version: "v9"}
+	h := newTestHost(t, ssh)
+	_, _, _ = h.TrimCaches(context.Background(), 123, []string{"o"})
+	if len(ssh.reqs) != 1 || ssh.reqs[0].Op != OpCaches || ssh.reqs[0].CacheMax != 123 || ssh.reqs[0].CacheInUse[0] != "o" {
+		t.Fatalf("%+v", ssh.reqs)
+	}
+}

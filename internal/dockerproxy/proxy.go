@@ -90,7 +90,7 @@ type Proxy struct {
 	// services.go).
 	containerJobNets map[string]bool
 	closed           chan struct{}
-	once     sync.Once
+	once             sync.Once
 }
 
 // New starts a proxy listening on cfg.Socket.

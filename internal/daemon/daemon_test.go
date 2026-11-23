@@ -340,8 +340,8 @@ func TestAutoCacheMountsAndEnv(t *testing.T) {
 	d := &Daemon{cfg: cfg, log: slog.New(slog.DiscardHandler)}
 	lane := scheduler.LaneKey{ScaleSetKey: core.ScaleSetKey{Target: core.Target{Owner: "org"}, OS: core.Linux}, Lane: 1}
 	spec := core.RunnerSpec{Env: map[string]string{}}
-	if s := d.autoCache(&spec, lane, scheduler.Grant{Host: "pc", Job: core.Job{Owner: "org", Repo: "app"}}); s != "" {
-		t.Fatal("a host's cache is not tracked here")
+	if s := d.autoCache(&spec, lane, scheduler.Grant{Host: "pc", Job: core.Job{Owner: "org", Repo: "app"}}); s != "org" {
+		t.Fatalf("scope %q", s)
 	}
 	if len(spec.Mounts) != 1 || spec.Mounts[0].ContainerPath != "/opt/rw-cache" || !strings.HasSuffix(spec.Mounts[0].HostPath, "/main/auto/org") {
 		t.Fatalf("%+v", spec.Mounts)

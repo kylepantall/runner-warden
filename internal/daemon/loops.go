@@ -344,44 +344,77 @@ func (d *Daemon) windowsIdleLoop(ctx context.Context) error {
 // autoCacheEvery is how often automatic caches are measured and trimmed.
 const autoCacheEvery = 30 * time.Minute
 
-// autoCacheLoop measures this host's automatic caches for status and removes
-// the least recently used scopes not in use once they outgrow
-// auto_cache.max_size.
+// hostCacheTrimmer is a Linux backend whose remote hosts keep caches too.
+type hostCacheTrimmer interface {
+	TrimCaches(ctx context.Context, host string, limit int64, inUse []string) (kept, removed []autocache.Usage, ok bool, err error)
+}
+
+// autoCacheLoop measures the automatic caches of this host and of every
+// [[linux.host]] for status, and removes each machine's least recently used
+// scopes not in use once they outgrow auto_cache.max_size.
 func (d *Daemon) autoCacheLoop(ctx context.Context) error {
 	t := time.NewTicker(autoCacheEvery)
 	defer t.Stop()
-	base := AutoCacheDir(d.cfg.Instance)
 	for {
-		if us, err := autocache.Scan(base); err != nil {
-			d.log.Warn("automatic cache scan failed", "error", err.Error())
-		} else {
-			d.mu.Lock()
-			inUse := map[string]bool{}
-			for _, r := range d.runners {
-				if r.cache != "" {
-					inUse[r.cache] = true
-				}
-			}
-			d.mu.Unlock()
-			gone, err := autocache.Evict(base, us, int64(d.cfg.AutoCache.MaxSize), inUse)
-			for _, g := range gone {
-				d.log.Info("automatic cache removed", "scope", g.Scope, "bytes", g.Bytes, "last_used", g.LastUsed)
-			}
-			if err != nil {
-				d.log.Warn("automatic cache eviction failed", "error", err.Error())
-			}
-			d.mu.Lock()
-			d.caches = slices.DeleteFunc(us, func(u autocache.Usage) bool {
-				return slices.ContainsFunc(gone, func(g autocache.Usage) bool { return g.Scope == u.Scope })
-			})
-			d.mu.Unlock()
-		}
+		d.trimAutoCaches(ctx)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
 		}
 	}
+}
+
+func (d *Daemon) trimAutoCaches(ctx context.Context) {
+	limit := int64(d.cfg.AutoCache.MaxSize)
+	inUse := map[string][]string{} // machine ("" = here) -> scopes
+	d.mu.Lock()
+	for _, r := range d.runners {
+		if r.cache != "" && r.lane.OS == core.Linux {
+			inUse[r.vm] = append(inUse[r.vm], r.cache)
+		}
+	}
+	d.mu.Unlock()
+	report := func(machine string, gone []autocache.Usage, err error) {
+		for _, g := range gone {
+			d.log.Info("automatic cache removed", "machine", machine, "scope", g.Scope, "bytes", g.Bytes, "last_used", g.LastUsed)
+		}
+		if err != nil {
+			d.log.Warn("automatic cache trim failed", "machine", machine, "error", err.Error())
+		}
+	}
+	var all []autocache.Usage
+	base := AutoCacheDir(d.cfg.Instance)
+	if us, err := autocache.Scan(base); err != nil {
+		d.log.Warn("automatic cache scan failed", "error", err.Error())
+	} else {
+		busy := map[string]bool{}
+		for _, s := range inUse[""] {
+			busy[s] = true
+		}
+		gone, err := autocache.Evict(base, us, limit, busy)
+		report("", gone, err)
+		all = append(all, slices.DeleteFunc(us, func(u autocache.Usage) bool {
+			return slices.ContainsFunc(gone, func(g autocache.Usage) bool { return g.Scope == u.Scope })
+		})...)
+	}
+	if tr, ok := d.backends[core.Linux].(hostCacheTrimmer); ok {
+		for _, h := range d.cfg.Linux.Hosts {
+			kept, gone, ok, err := tr.TrimCaches(ctx, h.Name, limit, inUse[h.Name])
+			if !ok {
+				continue
+			}
+			report(h.Name, gone, err)
+			for _, u := range kept {
+				u.Machine = h.Name
+				all = append(all, u)
+			}
+		}
+	}
+	slices.SortFunc(all, func(a, b autocache.Usage) int { return b.LastUsed.Compare(a.LastUsed) })
+	d.mu.Lock()
+	d.caches = all
+	d.mu.Unlock()
 }
 
 // packagesEvery is how often windows.package is re-checked on members that

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/core"
 )
 
@@ -141,5 +142,33 @@ func TestHostOf(t *testing.T) {
 	}
 	if h, id := HostOf("abc"); h != "" || id != "abc" {
 		t.Fatal(h, id)
+	}
+}
+
+type trimmer struct {
+	*fakeBackend
+	limit int64
+	inUse []string
+}
+
+func (t *trimmer) TrimCaches(_ context.Context, limit int64, inUse []string) ([]autocache.Usage, []autocache.Usage, error) {
+	t.limit, t.inUse = limit, inUse
+	return []autocache.Usage{{Scope: "o"}}, []autocache.Usage{{Scope: "old"}}, nil
+}
+
+func TestTrimCachesOnHost(t *testing.T) {
+	tr := &trimmer{fakeBackend: &fakeBackend{name: "pc"}}
+	plain := &fakeBackend{name: "other"}
+	p := NewPool(&fakeBackend{}, core.Caps{}, []Member{tr, plain}, nil)
+	if _, _, ok, _ := p.TrimCaches(context.Background(), "pc", 10, nil); ok {
+		t.Fatal("a down host is skipped")
+	}
+	_ = p.Prepare(context.Background())
+	kept, gone, ok, err := p.TrimCaches(context.Background(), "pc", 10, []string{"o"})
+	if !ok || err != nil || len(kept) != 1 || len(gone) != 1 || tr.limit != 10 || tr.inUse[0] != "o" {
+		t.Fatalf("%v %v %v %v", kept, gone, ok, err)
+	}
+	if _, _, ok, _ := p.TrimCaches(context.Background(), "other", 10, nil); ok {
+		t.Fatal("a member without caches is skipped")
 	}
 }

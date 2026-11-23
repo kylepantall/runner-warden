@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/core"
 )
 
@@ -217,6 +218,14 @@ func (h *Host) Cleanup(ctx context.Context, runner string) error {
 func (h *Host) List(ctx context.Context) ([]core.Handle, error) {
 	resp, err := h.call(ctx, Request{Op: OpList})
 	return resp.Handles, err
+}
+
+// TrimCaches measures the host's automatic caches and removes the least
+// recently used scopes not in inUse past limit. It returns what is kept and
+// what was removed.
+func (h *Host) TrimCaches(ctx context.Context, limit int64, inUse []string) ([]autocache.Usage, []autocache.Usage, error) {
+	resp, err := h.call(ctx, Request{Op: OpCaches, CacheMax: limit, CacheInUse: inUse})
+	return resp.Caches, resp.Removed, err
 }
 
 // Adopt re-checks an adopted runner's Docker proxy.
