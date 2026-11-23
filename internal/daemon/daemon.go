@@ -780,7 +780,7 @@ func (d *Daemon) autoCache(spec *core.RunnerSpec, l scheduler.LaneKey, g schedul
 		}
 	}
 	spec.Mounts = append(spec.Mounts, autocache.Mount(base, scope))
-	for k, v := range autocache.EnvFor(keep) {
+	for k, v := range autocache.EnvFor(autocache.Dir(base, scope), keep) {
 		spec.Env[k] = v
 	}
 	if g.Host != "" {

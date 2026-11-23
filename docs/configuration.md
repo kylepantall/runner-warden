@@ -190,7 +190,7 @@ Declare what jobs need; runner-warden installs it, so new machines need nothing 
 
 ## Automatic caches
 
-Every Linux runner gets its scope's cache dir at `/opt/rw-cache`, and the tools are pointed into it, so the second job is warm without any workflow change.
+Every Linux runner gets its scope's cache dir (`/var/cache/runner-warden/<instance>/auto/<scope>`, mounted at the same path so `container:` jobs can use the tool cache too), and the tools are pointed into it, so the second job is warm without any workflow change.
 
 | Variable | Cached |
 |---|---|

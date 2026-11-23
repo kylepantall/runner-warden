@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -102,7 +103,7 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 		// The runner's automatic cache: made for the runner user, its use
 		// recorded here, where this host's caches are trimmed.
 		for _, m := range req.Spec.Mounts {
-			if m.ContainerPath == autocache.MountPath {
+			if strings.HasPrefix(m.HostPath, daemon.AutoCacheDir(a.Instance)+"/") {
 				_ = autocache.TouchDir(m.HostPath, a.RunnerUID)
 			}
 		}
