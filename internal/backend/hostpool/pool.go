@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/core"
 )
 
@@ -314,6 +315,23 @@ func (p *Pool) Adopt(ctx context.Context, hd core.Handle) error {
 		return errNoLocal
 	}
 	return p.local.Adopt(ctx, hd)
+}
+
+// cacheTrimmer is a member that manages automatic caches on its machine.
+type cacheTrimmer interface {
+	TrimCaches(ctx context.Context, limit int64, inUse []string) (kept, removed []autocache.Usage, err error)
+}
+
+// TrimCaches measures and trims the automatic caches on host; ok is false
+// when the host does not support it or is down.
+func (p *Pool) TrimCaches(ctx context.Context, host string, limit int64, inUse []string) (kept, removed []autocache.Usage, ok bool, err error) {
+	h := p.hosts[host]
+	t, isT := h.(cacheTrimmer)
+	if h == nil || !isT || !h.Up() {
+		return nil, nil, false, nil
+	}
+	kept, removed, err = t.TrimCaches(ctx, limit, inUse)
+	return kept, removed, true, err
 }
 
 // Persistent reports this machine's persistent containers (they count

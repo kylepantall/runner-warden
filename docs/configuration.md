@@ -197,16 +197,27 @@ Every Linux runner gets its scope's cache dir at `/opt/rw-cache`, and the tools 
 | `RUNNER_TOOL_CACHE`, `AGENT_TOOLSDIRECTORY` | Versions setup-dotnet/node/java/go/python/dart/terraform download |
 | `NUGET_PACKAGES`, `npm_config_cache`, `YARN_CACHE_FOLDER`, `PIP_CACHE_DIR` | Package downloads |
 | `GOMODCACHE`, `GOCACHE` | Go modules and build cache |
-| `GRADLE_USER_HOME`, `PUB_CACHE` | Gradle and pub |
+| `GRADLE_USER_HOME`, `PUB_CACHE`, `TF_PLUGIN_CACHE_DIR` | Gradle, pub and Terraform providers |
+| `RW_CACHE_DIR` | The cache root: lets a workflow see it has a warm local cache |
 
 | Aspect | Behaviour |
 |---|---|
 | Scope | `repo`: per repo. `org`: per owner. A runner uses the scope of the job it was started for; on an org lane GitHub can, rarely, hand it another job of the same org |
 | Precedence | A `[[cache]]` that sets the same variable wins; a job's own `env:` wins over both |
-| Hot path | Each scope records its last use. Every 30 minutes this host measures them (`status` shows a CACHES table) and removes the least recently used scopes not in use until they fit `max_size` |
-| Linux hosts | Get the same dirs (created for the runner user); their size is not managed from here yet |
+| Hot path | Each scope records its last use. Every 30 minutes each machine's caches are measured (`status` shows a CACHES table) and the least recently used scopes not in use are removed until that machine's fit `max_size` |
+| Linux hosts | Same dirs (created for the runner user), measured and trimmed through the agent |
 | Windows, macOS | Their tool cache and the guest user's home already persist |
-| With `actions/cache` | Still downloads on a hit: skip it on self-hosted runners (`if: runner.environment != 'self-hosted'`) to gain the time |
+| With `actions/cache` | Still downloads on a hit. Skip it when the local cache is there (below) |
+
+Skipping `actions/cache` where runner-warden keeps the cache (a job's own `env:` setting the same variable hides runner-warden's, so read `RW_CACHE_DIR`):
+
+```yaml
+- id: rw
+  run: echo "dir=${RW_CACHE_DIR:-}" >> "$GITHUB_OUTPUT"
+- if: steps.rw.outputs.dir == ''
+  uses: actions/cache@v5
+  with: { path: ~/.nuget/packages, key: nuget-${{ hashFiles('**/*.csproj') }} }
+```
 
 ## Per-project runner images
 

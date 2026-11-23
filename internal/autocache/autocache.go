@@ -25,6 +25,9 @@ const usedFile = ".rw-last-used"
 
 // Env is what each tool is told; values are under MountPath.
 var Env = map[string]string{
+	// The cache root itself, so a workflow can tell a warm local cache is
+	// there and skip actions/cache (whose restore downloads even on a hit).
+	"RW_CACHE_DIR": MountPath,
 	// The runner's tool cache: setup-dotnet/node/java/go/python/dart/... keep
 	// each version they download.
 	"RUNNER_TOOL_CACHE":    MountPath + "/tool",
@@ -37,6 +40,7 @@ var Env = map[string]string{
 	"GOCACHE":              MountPath + "/go/build",
 	"GRADLE_USER_HOME":     MountPath + "/gradle",
 	"PUB_CACHE":            MountPath + "/pub",
+	"TF_PLUGIN_CACHE_DIR":  MountPath + "/terraform",
 }
 
 // Scope is the cache a job uses: "owner" or "owner/repo".
@@ -77,13 +81,20 @@ func EnvFor(keep map[string]bool) map[string]string {
 }
 
 // Touch records a use of the scope now, creating its directory for uid.
-func Touch(base, scope string, uid int) error {
-	dir := Dir(base, scope)
+func Touch(base, scope string, uid int) error { return TouchDir(Dir(base, scope), uid) }
+
+// TouchDir is Touch for a scope's directory.
+func TouchDir(dir string, uid int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // the runner user must reach it
 		return err
 	}
 	if os.Geteuid() == 0 {
 		_ = os.Chown(dir, uid, uid)
+	}
+	// Terraform ignores a plugin cache dir that does not exist.
+	tf := filepath.Join(dir, "terraform")
+	if err := os.MkdirAll(tf, 0o755); err == nil && os.Geteuid() == 0 { //nolint:gosec // the runner user must reach it
+		_ = os.Chown(tf, uid, uid)
 	}
 	f := filepath.Join(dir, usedFile)
 	now := time.Now()
@@ -97,6 +108,7 @@ func Touch(base, scope string, uid int) error {
 
 // Usage is one scope's cache.
 type Usage struct {
+	Machine  string    `json:"machine,omitempty"` // "" for this host
 	Scope    string    `json:"scope"`
 	Bytes    int64     `json:"bytes"`
 	LastUsed time.Time `json:"last_used"`

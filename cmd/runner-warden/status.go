@@ -262,19 +262,23 @@ func renderStatus(out io.Writer, rep daemon.StatusReport) {
 		for _, c := range rep.AutoCaches {
 			total += c.Bytes
 		}
-		fmt.Fprintf(out, "\ncaches   %s of %s (least recently used go first)\n", size(total), size(rep.AutoCacheMax))
+		fmt.Fprintf(out, "\ncaches   %s (each machine keeps %s; least recently used go first)\n", size(total), size(rep.AutoCacheMax))
 		w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "CACHE\tSIZE\tLAST USED")
+		fmt.Fprintln(w, "CACHE\tMACHINE\tSIZE\tLAST USED")
 		for i, c := range rep.AutoCaches {
 			if i == 8 {
-				fmt.Fprintf(w, "… %d more\t\t\n", len(rep.AutoCaches)-i)
+				fmt.Fprintf(w, "… %d more\t\t\t\n", len(rep.AutoCaches)-i)
 				break
 			}
 			used := "-"
 			if !c.LastUsed.IsZero() {
 				used = time.Since(c.LastUsed).Truncate(time.Minute).String() + " ago"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\n", c.Scope, size(c.Bytes), used)
+			m := c.Machine
+			if m == "" {
+				m = dash(rep.Hostname)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Scope, m, size(c.Bytes), used)
 		}
 		_ = w.Flush()
 	}

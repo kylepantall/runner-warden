@@ -104,7 +104,7 @@ type runnerRec struct {
 	handle   core.Handle
 	started  time.Time
 	vm       string
-	cache    string // automatic-cache scope on this host, "" for none
+	cache    string // automatic-cache scope ("" for none), on vm's machine
 	lastCPU  float64
 	lastLog  int64
 	lastIO   int64
@@ -762,7 +762,7 @@ const WindowsVMEnv = "RUNNER_WARDEN_VM"
 func AutoCacheDir(instance string) string { return filepath.Join(config.CacheDir, instance, "auto") }
 
 // autoCache mounts the job's automatic cache into a Linux runner and points
-// the tools at it. It returns the scope when the cache is on this host.
+// the tools at it, and returns its scope.
 // [[cache]] entries setting the same variables win.
 func (d *Daemon) autoCache(spec *core.RunnerSpec, l scheduler.LaneKey, g scheduler.Grant) string {
 	if l.OS != core.Linux || !d.cfg.AutoCache.On() {
@@ -784,7 +784,7 @@ func (d *Daemon) autoCache(spec *core.RunnerSpec, l scheduler.LaneKey, g schedul
 		spec.Env[k] = v
 	}
 	if g.Host != "" {
-		return "" // the host's backend creates the dir; its usage stays there
+		return scope // the host's backend creates the dir; its usage is kept there
 	}
 	if err := autocache.Touch(base, scope, d.cfg.Linux.RunnerUID); err != nil {
 		d.log.Warn("automatic cache unavailable", "scope", scope, "error", err.Error())

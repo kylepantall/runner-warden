@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kylepantall/runner-warden/internal/autocache"
 	"github.com/kylepantall/runner-warden/internal/backend/docker"
 	"github.com/kylepantall/runner-warden/internal/backend/linuxhost"
 	"github.com/kylepantall/runner-warden/internal/config"
@@ -50,6 +52,9 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 	a := req.Config
 	if naming.ValidatePrefix(a.Instance) != nil || a.HostID == "" || a.Image == "" {
 		return fail(errors.New("agent: instance, host id and image are required"))
+	}
+	if req.Op == linuxhost.OpCaches {
+		return agentCaches(req)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -93,5 +98,41 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 	if err != nil {
 		return fail(err)
 	}
+	if req.Op == linuxhost.OpStart && req.Spec != nil {
+		// The runner's automatic cache: made for the runner user, its use
+		// recorded here, where this host's caches are trimmed.
+		for _, m := range req.Spec.Mounts {
+			if m.ContainerPath == autocache.MountPath {
+				_ = autocache.TouchDir(m.HostPath, a.RunnerUID)
+			}
+		}
+	}
 	return linuxhost.Dispatch(cmd.Context(), b, req, version)
+}
+
+// agentCaches measures this machine's automatic caches and trims them.
+func agentCaches(req linuxhost.Request) linuxhost.Response {
+	resp := linuxhost.Response{Version: version}
+	base := daemon.AutoCacheDir(req.Config.Instance)
+	us, err := autocache.Scan(base)
+	if err != nil {
+		resp.Error = err.Error()
+		return resp
+	}
+	inUse := map[string]bool{}
+	for _, s := range req.CacheInUse {
+		inUse[s] = true
+	}
+	if req.CacheMax > 0 {
+		gone, err := autocache.Evict(base, us, req.CacheMax, inUse)
+		resp.Removed = gone
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		us = slices.DeleteFunc(us, func(u autocache.Usage) bool {
+			return slices.ContainsFunc(gone, func(g autocache.Usage) bool { return g.Scope == u.Scope })
+		})
+	}
+	resp.Caches = us
+	return resp
 }
