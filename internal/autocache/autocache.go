@@ -81,8 +81,10 @@ func EnvFor(keep map[string]bool) map[string]string {
 }
 
 // Touch records a use of the scope now, creating its directory for uid.
-func Touch(base, scope string, uid int) error {
-	dir := Dir(base, scope)
+func Touch(base, scope string, uid int) error { return TouchDir(Dir(base, scope), uid) }
+
+// TouchDir is Touch for a scope's directory.
+func TouchDir(dir string, uid int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // the runner user must reach it
 		return err
 	}

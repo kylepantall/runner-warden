@@ -98,6 +98,15 @@ func runAgent(cmd *cobra.Command, req linuxhost.Request) linuxhost.Response {
 	if err != nil {
 		return fail(err)
 	}
+	if req.Op == linuxhost.OpStart && req.Spec != nil {
+		// The runner's automatic cache: made for the runner user, its use
+		// recorded here, where this host's caches are trimmed.
+		for _, m := range req.Spec.Mounts {
+			if m.ContainerPath == autocache.MountPath {
+				_ = autocache.TouchDir(m.HostPath, a.RunnerUID)
+			}
+		}
+	}
 	return linuxhost.Dispatch(cmd.Context(), b, req, version)
 }
 
